@@ -1,0 +1,24 @@
+{
+  "name": "instagram-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "controller.js",
+  "scripts": {
+    "start": "node controller.js",
+    "save-session": "node save-session.js",
+    "test": "node --check controller.js && node --check save-session.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "instagram-private-api": "^1.46.1",
+    "n8n-nodes-instagram-private-api-wrapped": "^0.0.10",
+    "playwright": "^1.60.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer": "^25.1.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}

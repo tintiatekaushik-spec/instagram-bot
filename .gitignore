@@ -1,0 +1,19 @@
+node_modules/
+
+# Local secrets and browser session/cookie state
+.env
+.env.*
+session.json
+sessions/
+
+# Runtime/generated data
+action-history.json
+action-thumbnails/
+*.log
+login-error.png
+comment-error.png
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
