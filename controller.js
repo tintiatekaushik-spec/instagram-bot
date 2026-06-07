@@ -29,6 +29,8 @@ const createBrowserSession = (accountKey = 'default', accountName = accountKey) 
     manualVerificationAutoCheckInFlight: false,
     manualVerificationResolvedAt: null,
     accountPassword: null,
+    queuedActionDrainScheduled: false,
+    queuedActionDrainInFlight: false,
 });
 
 const getBrowserSession = (accountKey = 'default', accountName = accountKey) => {
@@ -106,11 +108,15 @@ const SESSION_FILE = path.join(__dirname, 'session.json');
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 const ACTION_HISTORY_FILE = process.env.ACTION_HISTORY_FILE || path.join(__dirname, 'action-history.json');
 const ACTION_THUMBNAILS_DIR = path.join(__dirname, 'action-thumbnails');
+const RUNTIME_ERROR_LOG_FILE = process.env.RUNTIME_ERROR_LOG_FILE || path.join(__dirname, 'controller-runtime-errors.log');
 const INSTAGRAM_HOME_URL = 'https://www.instagram.com/';
 const INSTAGRAM_LOGIN_URL = 'https://www.instagram.com/accounts/login/';
 const PORT = process.env.PORT || 3000;
 const AUTO_OPEN_MONITOR = process.env.AUTO_OPEN_MONITOR !== 'false';
 const HEADLESS = process.env.HEADLESS === 'true';
+const LOG_ACTIONS = process.env.LOG_ACTIONS !== 'false';
+const LOG_HTTP_REQUESTS = process.env.LOG_HTTP_REQUESTS === 'true';
+const LOG_DEBUG_DETAILS = process.env.LOG_DEBUG_DETAILS === 'true';
 const BROWSER_VIEWPORT = {
     width: Number(process.env.BROWSER_VIEWPORT_WIDTH) || 1440,
     height: Number(process.env.BROWSER_VIEWPORT_HEIGHT) || 1000,
@@ -130,11 +136,28 @@ const MANUAL_VERIFICATION_CHECK_MS = Number(process.env.MANUAL_VERIFICATION_CHEC
 const MANUAL_VERIFICATION_RESUME_DELAY_MS = Number(process.env.MANUAL_VERIFICATION_RESUME_DELAY_MS) || 1500;
 const MANUAL_ACTION_COMPLETION_WAIT_MS = Number(process.env.MANUAL_ACTION_COMPLETION_WAIT_MS) || 110000;
 const MANUAL_ACTION_COMPLETION_POLL_MS = Number(process.env.MANUAL_ACTION_COMPLETION_POLL_MS) || 1000;
-const COMMENT_COMPOSER_OPEN_WAIT_MS = Number(process.env.COMMENT_COMPOSER_OPEN_WAIT_MS) || 45000;
+const COMMENT_COMPOSER_OPEN_WAIT_MS = Number(process.env.COMMENT_COMPOSER_OPEN_WAIT_MS) || 50000;
+const COMMENT_COMPOSER_HINT_RETRY_MS = Number(process.env.COMMENT_COMPOSER_HINT_RETRY_MS) || 12000;
+const DASHBOARD_RUNNING_STALE_MS = Number(process.env.DASHBOARD_RUNNING_STALE_MS) || 180000;
 const INDIA_TIME_ZONE = 'Asia/Kolkata';
 const INDIA_UTC_OFFSET_MINUTES = 330;
 const ACTION_HISTORY_MAX_EVENTS = Number(process.env.ACTION_HISTORY_MAX_EVENTS) || 800;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const logDebug = message => {
+    if (LOG_DEBUG_DETAILS) {
+        console.log(message);
+    }
+};
+const appendRuntimeErrorLog = (label, error) => {
+    const message = error?.stack || error?.message || String(error || '');
+    const line = `[${new Date().toISOString()}] ${label}: ${message}\n`;
+    console.error(line.trim());
+    try {
+        fs.appendFileSync(RUNTIME_ERROR_LOG_FILE, line);
+    } catch (_error) {
+        // Console logging above is the fallback if the runtime log cannot be written.
+    }
+};
 const COMMENT_COMPOSER_SELECTORS = [
     'textarea[aria-label*="comment" i]',
     'textarea[placeholder*="comment" i]',
@@ -150,6 +173,14 @@ const COMMENT_COMPOSER_SELECTORS = [
 const COMMENT_COMPOSER_SELECTOR = COMMENT_COMPOSER_SELECTORS.join(', ');
 
 app.use('/action-thumbnails', express.static(ACTION_THUMBNAILS_DIR));
+
+process.on('unhandledRejection', error => {
+    appendRuntimeErrorLog('Unhandled promise rejection', error);
+});
+
+process.on('uncaughtExceptionMonitor', error => {
+    appendRuntimeErrorLog('Uncaught exception', error);
+});
 
 const openUrlInDefaultBrowser = url => {
     const command = process.platform === 'win32'
@@ -333,6 +364,7 @@ const normalizeDashboardStatus = value => {
         'running',
         'active',
         'working',
+        'queued',
         'navigating',
         'loaded',
         'liking',
@@ -423,6 +455,7 @@ const getDashboardPostFromPayload = (payload = {}, defaults = {}) => {
     );
     const rowNumber = getFirstPayloadValue(payload, ['row_number', 'rowNumber', 'row', 'sheet_row', 'sheetRow', '__row_number']);
     const status = normalizeDashboardStatus(getFirstPayloadValue(payload, ['action_status', 'dashboard_status', 'status', 'state']) || defaults.status);
+    const phase = defaults.phase || (status === 'running' && defaults.source === 'sheet' ? 'queued' : status);
     const comment = getFirstPayloadValue(payload, ['comment', 'comment_text', 'text', 'message']);
 
     if (!accountKey && !contentKey && !url && !rowNumber) {
@@ -438,10 +471,10 @@ const getDashboardPostFromPayload = (payload = {}, defaults = {}) => {
         comment: comment || defaults.comment || null,
         scheduledAt: getDashboardScheduledValue(payload) || defaults.scheduledAt || null,
         status,
-        phase: defaults.phase || status,
+        phase,
         source: defaults.source || 'sheet',
         error: defaults.error || null,
-        startedAt: defaults.startedAt || (status === 'running' ? new Date().toISOString() : null),
+        startedAt: defaults.startedAt || null,
         completedAt: defaults.completedAt || (status === 'done' ? new Date().toISOString() : null),
         thumbnailUrl: defaults.thumbnailUrl || payload.thumbnailUrl || payload.thumbnail_url || null,
         updatedAt: new Date().toISOString(),
@@ -496,11 +529,40 @@ const findRememberedDashboardPost = ({ accountKey, contentKey, rowNumber, url } 
         }
     }
 
+    const history = readActionHistory();
+    const storedPosts = Object.values(history.posts || {});
+    if (normalizedRowNumber) {
+        const byStoredRow = storedPosts.find(post => post.accountKey === normalizedAccountKey && String(post.rowNumber || '') === normalizedRowNumber);
+        if (byStoredRow) {
+            return byStoredRow;
+        }
+    }
+    if (normalizedContentKey) {
+        const byStoredContent = storedPosts.find(post => post.accountKey === normalizedAccountKey && post.contentKey === normalizedContentKey && post.rowNumber);
+        if (byStoredContent) {
+            return byStoredContent;
+        }
+    }
+
     return null;
 };
 
 const upsertDashboardPost = post => {
-    const postKey = getDashboardPostKey(post);
+    const rememberedPost = !post?.rowNumber
+        ? findRememberedDashboardPost({
+            accountKey: post?.accountKey || post?.account,
+            contentKey: post?.contentKey,
+            url: post?.url,
+        })
+        : null;
+    const resolvedPost = rememberedPost
+        ? {
+            ...rememberedPost,
+            ...post,
+            rowNumber: post.rowNumber || rememberedPost.rowNumber || null,
+        }
+        : post;
+    const postKey = getDashboardPostKey(resolvedPost);
     if (!postKey) {
         return null;
     }
@@ -509,19 +571,27 @@ const upsertDashboardPost = post => {
     const previous = history.posts[postKey] || {};
     const merged = {
         ...previous,
-        ...post,
+        ...resolvedPost,
         postKey,
         createdAt: previous.createdAt || post.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
     };
+    const duplicateKeys = [
+        merged.rowNumber ? null : rememberedPost?.postKey,
+        merged.contentKey ? getHistoryKey(merged.accountKey, merged.contentKey) : null,
+        merged.url ? `${merged.accountKey || 'default'}::url:${normalizeUrlForRedirectCheck(merged.url).toLowerCase()}` : null,
+    ].filter(key => key && key !== postKey);
 
     if (!shouldStoreDashboardStatus(merged.status) && !shouldStoreDashboardStatus(merged.phase)) {
         delete history.posts[postKey];
+        duplicateKeys.forEach(key => delete history.posts[key]);
         writeActionHistory(history);
         return null;
     }
 
+    duplicateKeys.forEach(key => delete history.posts[key]);
     history.posts[postKey] = merged;
+    rememberDashboardPost(merged);
     writeActionHistory(history);
     return merged;
 };
@@ -623,12 +693,183 @@ const normalizeDashboardPassthroughRow = (row, syncedCount) => ({
     dashboard_synced_count: syncedCount,
 });
 
+const getDashboardSummaryRank = post => {
+    const status = normalizeDashboardStatus(post?.status || post?.phase);
+    const phase = String(post?.phase || '').toLowerCase();
+    const updatedAt = Date.parse(post?.updatedAt || post?.completedAt || post?.startedAt || post?.createdAt || '') || 0;
+    let rank = 0;
+
+    if (status === 'done') {
+        rank += 600;
+    } else if (status === 'running') {
+        rank += 500;
+    } else if (status === 'failed') {
+        rank += 100;
+    }
+
+    if (phase === 'unverified' && post?.source === 'sheet') {
+        rank -= 80;
+    }
+    if (post?.source === 'controller') {
+        rank += 30;
+    }
+    if (post?.thumbnailUrl) {
+        rank += 10;
+    }
+
+    return rank + updatedAt / 100000000000000;
+};
+
+const mergeDashboardSummaryDuplicates = posts => {
+    const byTarget = new Map();
+
+    posts.forEach(post => {
+        const targetKey = post?.accountKey && post?.contentKey
+            ? getHistoryKey(post.accountKey, post.contentKey)
+            : post?.postKey || getDashboardPostKey(post);
+        if (!targetKey) {
+            return;
+        }
+
+        const previous = byTarget.get(targetKey);
+        if (!previous) {
+            byTarget.set(targetKey, post);
+            return;
+        }
+
+        const winner = getDashboardSummaryRank(post) >= getDashboardSummaryRank(previous)
+            ? post
+            : previous;
+        const fallback = winner === post ? previous : post;
+        byTarget.set(targetKey, {
+            ...fallback,
+            ...winner,
+            rowNumber: winner.rowNumber || fallback.rowNumber || null,
+            scheduledAt: winner.scheduledAt || fallback.scheduledAt || null,
+            createdAt: fallback.createdAt && winner.createdAt
+                ? (Date.parse(fallback.createdAt) <= Date.parse(winner.createdAt) ? fallback.createdAt : winner.createdAt)
+                : winner.createdAt || fallback.createdAt || null,
+            postKey: winner.rowNumber || fallback.rowNumber
+                ? `${winner.accountKey || fallback.accountKey || 'default'}::row:${winner.rowNumber || fallback.rowNumber}`
+                : winner.postKey || fallback.postKey || getDashboardPostKey(winner),
+        });
+    });
+
+    return Array.from(byTarget.values());
+};
+
+const findTrustedCompletionForDashboardPost = (history, post) => {
+    const accountKey = normalizeAccountName(post?.accountKey || post?.account) || 'default';
+    if (post?.contentKey) {
+        const byContent = history.completed[getHistoryKey(accountKey, post.contentKey)] || null;
+        if (isTrustedCompletedAction(byContent)) {
+            return byContent;
+        }
+    }
+
+    const rowNumber = String(post?.rowNumber || '').trim();
+    if (rowNumber) {
+        return Object.values(history.completed || {}).find(completedAction => {
+            if (!isTrustedCompletedAction(completedAction)) {
+                return false;
+            }
+
+            const completedAccountKey = normalizeAccountName(completedAction.account) || 'default';
+            return completedAccountKey === accountKey && String(completedAction.rowNumber || '').trim() === rowNumber;
+        }) || null;
+    }
+
+    return null;
+};
+
+const mergeCompletedActionIntoDashboardPost = (post, completedAction, postKey) => {
+    const accountKey = normalizeAccountName(completedAction.account || post?.accountKey || post?.account) || 'default';
+    return {
+        ...post,
+        postKey,
+        account: post?.account || completedAction.account || accountKey,
+        accountKey,
+        contentKey: completedAction.contentKey || post?.contentKey || null,
+        url: completedAction.finalUrl || completedAction.originalUrl || post?.url || getInstagramUrlForContentKey(completedAction.contentKey),
+        rowNumber: completedAction.rowNumber || post?.rowNumber || null,
+        comment: completedAction.comment || post?.comment || null,
+        status: 'done',
+        phase: 'done',
+        source: 'controller',
+        error: null,
+        completedAt: completedAction.completedAt || post?.completedAt || null,
+        thumbnailUrl: completedAction.thumbnailUrl || post?.thumbnailUrl || null,
+        updatedAt: completedAction.completedAt || post?.updatedAt || null,
+    };
+};
+
+const isDashboardPostLive = post => {
+    const session = browserSessions.get(normalizeAccountName(post?.accountKey || post?.account));
+    if (!session) {
+        return false;
+    }
+
+    const target = {
+        contentKey: post.contentKey || null,
+        rowNumber: post.rowNumber || null,
+        url: post.url || null,
+    };
+
+    if (session.currentTask && session.page && !session.page.isClosed() && sameTaskTarget(session.currentTask, target)) {
+        return true;
+    }
+
+    return (session.queuedActionTasks || []).some(task => sameTaskTarget(task, target));
+};
+
+const isQueuedDashboardPost = post => {
+    const phase = String(post?.phase || '').trim().toLowerCase();
+    return phase === 'queued'
+        || Boolean(post?.queued)
+        || Boolean(post?.queuedAt)
+        || (normalizeDashboardStatus(post?.status) === 'running' && !post?.startedAt && post?.source === 'sheet');
+};
+
+const markStaleRunningDashboardPost = post => {
+    if (normalizeDashboardStatus(post?.status || post?.phase) !== 'running') {
+        return post;
+    }
+    if (isQueuedDashboardPost(post)) {
+        return {
+            ...post,
+            status: 'running',
+            phase: 'queued',
+            error: null,
+            completedAt: null,
+        };
+    }
+    if (isDashboardPostLive(post)) {
+        return post;
+    }
+
+    const updatedAt = Date.parse(post?.updatedAt || post?.startedAt || post?.createdAt || '') || 0;
+    const ageMs = updatedAt ? Date.now() - updatedAt : DASHBOARD_RUNNING_STALE_MS + 1;
+    if (ageMs < DASHBOARD_RUNNING_STALE_MS) {
+        return post;
+    }
+
+    return {
+        ...post,
+        status: 'failed',
+        phase: 'stalled',
+        error: post.error || 'This action was left running, but no live browser session is active now. Rerun this row.',
+        completedAt: null,
+    };
+};
+
 const getDashboardPostsSummary = () => {
     const history = readActionHistory();
     const posts = Object.entries(history.posts).map(([postKey, post]) => {
-        const completedAction = post.contentKey
-            ? history.completed[getHistoryKey(post.accountKey, post.contentKey)]
-            : null;
+        const completedAction = findTrustedCompletionForDashboardPost(history, post);
+        if (completedAction) {
+            return mergeCompletedActionIntoDashboardPost(post, completedAction, postKey);
+        }
+
         const manualPhase = getManualActionPhase(post);
         if (manualPhase) {
             return {
@@ -641,8 +882,7 @@ const getDashboardPostsSummary = () => {
         }
 
         const isDoneStatus = normalizeDashboardStatus(post.status || post.phase) === 'done';
-        const hasTrustedCompletion = isTrustedCompletedAction(completedAction);
-        if (isDoneStatus && !hasTrustedCompletion) {
+        if (isDoneStatus) {
             return {
                 ...post,
                 postKey,
@@ -653,7 +893,7 @@ const getDashboardPostsSummary = () => {
             };
         }
 
-        return { ...post, postKey };
+        return markStaleRunningDashboardPost({ ...post, postKey });
     });
 
     Object.entries(history.completed).forEach(([historyKey, completedAction]) => {
@@ -672,6 +912,8 @@ const getDashboardPostsSummary = () => {
             accountKey,
             contentKey: completedAction.contentKey,
             url: completedAction.finalUrl || completedAction.originalUrl || getInstagramUrlForContentKey(completedAction.contentKey),
+            rowNumber: completedAction.rowNumber || null,
+            comment: completedAction.comment || null,
             status: 'done',
             phase: 'done',
             source: 'history',
@@ -682,7 +924,8 @@ const getDashboardPostsSummary = () => {
         });
     });
 
-    return posts.filter(post => ['running', 'done', 'failed'].includes(normalizeDashboardStatus(post.status || post.phase)));
+    return mergeDashboardSummaryDuplicates(posts)
+        .filter(post => ['running', 'done', 'failed'].includes(normalizeDashboardStatus(post.status || post.phase)));
 };
 
 const appendActionEvent = event => {
@@ -696,6 +939,7 @@ const appendActionEvent = event => {
         action: event.action || event.phase || 'update',
         status: event.status || event.phase || null,
         contentKey: event.contentKey || null,
+        rowNumber: event.rowNumber || null,
         url: event.url || event.originalUrl || event.finalUrl || null,
         message: event.message || null,
         error: event.error || null,
@@ -709,6 +953,39 @@ const appendActionEvent = event => {
     return actionEvent;
 };
 
+const formatConsoleTime = value => {
+    try {
+        return new Intl.DateTimeFormat('en-IN', {
+            timeZone: INDIA_TIME_ZONE,
+            hour12: false,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+        }).format(value ? new Date(value) : new Date());
+    } catch (_error) {
+        return new Date().toLocaleTimeString();
+    }
+};
+
+const getActionConsoleMessage = event => {
+    const pieces = [
+        event.accountKey || event.account || 'account',
+        event.rowNumber ? `row ${event.rowNumber}` : null,
+        event.contentKey || null,
+        `-> ${event.action || event.status || 'update'}`,
+    ].filter(Boolean);
+    const tail = event.error || event.message;
+    return tail ? `${pieces.join(' ')} | ${tail}` : pieces.join(' ');
+};
+
+const logActionStatus = event => {
+    if (!LOG_ACTIONS || !event) {
+        return;
+    }
+
+    console.log(`[${formatConsoleTime(event.time)}] ${getActionConsoleMessage(event)}`);
+};
+
 const recordTaskEvent = (task, action, extra = {}) => {
     if (!task) {
         return null;
@@ -720,6 +997,7 @@ const recordTaskEvent = (task, action, extra = {}) => {
         account: task.accountName || task.accountKey,
         accountKey: task.accountKey,
         contentKey: task.contentKey || task.requestedContentKey || null,
+        rowNumber: task.rowNumber || null,
         url: task.originalUrl || task.finalUrl || getInstagramUrlForContentKey(task.contentKey) || null,
         comment: task.comment || null,
         status,
@@ -731,16 +1009,19 @@ const recordTaskEvent = (task, action, extra = {}) => {
         thumbnailUrl: extra.thumbnailUrl || task.thumbnailUrl || null,
     });
 
-    return appendActionEvent({
+    const actionEvent = appendActionEvent({
         account: task.accountName || task.accountKey,
         accountKey: task.accountKey,
         action,
         status,
         contentKey: task.contentKey || task.requestedContentKey || null,
+        rowNumber: task.rowNumber || null,
         url: task.originalUrl || task.finalUrl || getInstagramUrlForContentKey(task.contentKey) || null,
         message: extra.message || null,
         error: extra.error || null,
     });
+    logActionStatus(actionEvent);
+    return actionEvent;
 };
 
 const safeThumbnailPart = value => String(value || 'target').replace(/[^a-z0-9._-]/gi, '_').slice(0, 120) || 'target';
@@ -786,11 +1067,11 @@ const markCurrentTaskCompleted = async () => {
         throw new Error('Comment was not visibly verified on Instagram, so this row will not be marked done.');
     }
 
-    const history = readActionHistory();
     const historyKey = getHistoryKey(task.accountKey, task.contentKey);
     const completedAction = {
         account: task.accountName || task.accountKey,
         contentKey: task.contentKey,
+        rowNumber: task.rowNumber || null,
         originalUrl: task.originalUrl,
         finalUrl: isPageOpen() ? page.url() : task.finalUrl,
         completedAt: new Date().toISOString(),
@@ -803,6 +1084,7 @@ const markCurrentTaskCompleted = async () => {
         task.thumbnailUrl = thumbnailUrl;
     }
 
+    const history = readActionHistory();
     history.completed[historyKey] = completedAction;
     writeActionHistory(history);
     task.phase = 'commented';
@@ -813,6 +1095,7 @@ const markCurrentTaskCompleted = async () => {
         account: task.accountName || task.accountKey,
         accountKey: task.accountKey,
         contentKey: task.contentKey,
+        rowNumber: task.rowNumber || null,
         url: completedAction.finalUrl || completedAction.originalUrl,
         status: 'done',
         phase: 'commented',
@@ -904,6 +1187,7 @@ const skippedTaskResponse = action => {
         contentKey: task.contentKey,
         alreadyCompleted: task.completedAction,
         browserClosed: !isPageOpen(),
+        ...completedActionSheetFields(task.completedAction),
     };
 };
 
@@ -1013,6 +1297,7 @@ const queueActionTask = (session, payload, defaults = {}) => {
         comment: target.comment || rememberedPost?.comment || null,
     };
     let task = findQueuedActionTask(session, mergedTarget);
+    const isNewTask = !task;
 
     if (!task) {
         task = {
@@ -1036,6 +1321,28 @@ const queueActionTask = (session, payload, defaults = {}) => {
     task.phase = 'queued';
     task.updatedAt = new Date().toISOString();
     task.queueKey = getQueuedTaskKey(task);
+    upsertDashboardPost({
+        account: task.accountName || task.accountKey,
+        accountKey: task.accountKey,
+        contentKey: task.contentKey || task.requestedContentKey || null,
+        rowNumber: task.rowNumber || null,
+        url: task.originalUrl || getInstagramUrlForContentKey(task.contentKey || task.requestedContentKey),
+        comment: task.comment || null,
+        status: 'running',
+        phase: 'queued',
+        source: 'controller',
+        queued: true,
+        queuedAt: task.queuedAt,
+        startedAt: null,
+        completedAt: null,
+        error: null,
+    });
+    if (isNewTask) {
+        recordTaskEvent(task, 'queued', {
+            status: 'running',
+            message: 'Waiting for this account to finish its active action.',
+        });
+    }
     return task;
 };
 
@@ -1054,6 +1361,48 @@ const completedActionResponse = (action, completedAction, account) => ({
     account,
     contentKey: completedAction?.contentKey || null,
     completedAction,
+    ...completedActionSheetFields(completedAction),
+});
+
+const getSheetStatusFields = ({ status, rowNumber = null, completedAction = null, error = null } = {}) => {
+    const normalizedStatus = normalizeDashboardStatus(status);
+    const finalRowNumber = rowNumber || completedAction?.rowNumber || null;
+    const verifiedDone = normalizedStatus === 'done' && Boolean(completedAction?.verification?.visible);
+    const sheetActionStatus = verifiedDone
+        ? 'done'
+        : normalizedStatus === 'failed'
+            ? 'failed'
+            : 'running';
+
+    return {
+        sheetShouldUpdate: Boolean(finalRowNumber),
+        sheetRowNumber: finalRowNumber ? String(finalRowNumber) : null,
+        sheetActionStatus,
+        sheetRun: verifiedDone ? 'no' : 'yes',
+        sheetErrorMessage: sheetActionStatus === 'failed' ? String(error || 'Action failed') : '',
+        sheetCompletedVerified: verifiedDone,
+        sheetCanMarkDone: verifiedDone,
+        sheetCanMarkFailed: sheetActionStatus === 'failed',
+        sheet: {
+            shouldUpdate: Boolean(finalRowNumber),
+            rowNumber: finalRowNumber ? String(finalRowNumber) : null,
+            action_status: sheetActionStatus,
+            run: verifiedDone ? 'no' : 'yes',
+            error_message: sheetActionStatus === 'failed' ? String(error || 'Action failed') : '',
+            completed_verified: verifiedDone,
+        },
+    };
+};
+
+const completedActionSheetFields = completedAction => getSheetStatusFields({
+    status: 'done',
+    rowNumber: completedAction?.rowNumber || null,
+    completedAction,
+});
+
+const runningSheetFields = rowNumber => getSheetStatusFields({
+    status: 'running',
+    rowNumber,
 });
 
 const queuedTaskResponse = (action, task, activeTask) => ({
@@ -1062,10 +1411,13 @@ const queuedTaskResponse = (action, task, activeTask) => ({
     queued: true,
     status: 'running',
     actionStatus: 'running',
+    phase: 'queued',
     action,
     account: task.accountName || task.accountKey,
     contentKey: task.contentKey || task.requestedContentKey || null,
     rowNumber: task.rowNumber || null,
+    queuedAt: task.queuedAt || null,
+    ...runningSheetFields(task.rowNumber || null),
     waitingFor: activeTask
         ? {
             contentKey: activeTask.contentKey || activeTask.requestedContentKey || null,
@@ -1302,6 +1654,7 @@ const manualVerificationResponse = (action, task, extra = {}) => {
         account: pausedTask?.accountName || pausedTask?.accountKey || extra.account || null,
         contentKey: pausedTask?.contentKey || pausedTask?.requestedContentKey || extra.contentKey || null,
         rowNumber: pausedTask?.rowNumber || extra.rowNumber || null,
+        ...runningSheetFields(pausedTask?.rowNumber || extra.rowNumber || null),
         phase,
         verificationRequired: phase !== 'login-needed' || extra.verificationRequired === true,
         loginRequired: phase === 'login-needed' || extra.loginRequired === true,
@@ -1312,7 +1665,7 @@ const manualVerificationResponse = (action, task, extra = {}) => {
 };
 
 const sendManualVerificationResponse = (res, action, errorOrTask, extra = {}) => {
-    const task = ensurePausedTaskPhase(errorOrTask?.manualVerification ? getActiveTask() : errorOrTask);
+    const task = ensurePausedTaskPhase(errorOrTask?.manualVerification ? (errorOrTask.task || getActiveTask()) : errorOrTask);
     const error = errorOrTask?.manualVerification ? errorOrTask : null;
     const phase = extra.phase || getManualActionPhase(task) || getManualActionPhase(error?.message) || task?.phase;
     return res.json(manualVerificationResponse(action, task, {
@@ -1415,6 +1768,13 @@ const createManualVerificationError = ({ stage, blocker, task }) => {
     return error;
 };
 
+const createAutomaticLoginFailureError = message => {
+    const error = new Error(message);
+    error.disableManualFallback = true;
+    error.automaticLoginFailure = true;
+    return error;
+};
+
 const runInBrowserSession = async (session, operation, label = 'operation') => {
     currentAccountKey = session.accountKey;
     session.pendingOperations += 1;
@@ -1431,7 +1791,7 @@ const runInBrowserSession = async (session, operation, label = 'operation') => {
                 throw error;
             }
 
-            const manualPhase = getManualActionPhase(error?.message);
+            const manualPhase = error?.disableManualFallback ? null : getManualActionPhase(error?.message);
             if (manualPhase) {
                 const task = await markCurrentTaskPaused({
                     phase: manualPhase,
@@ -1470,14 +1830,19 @@ const runInBrowserSession = async (session, operation, label = 'operation') => {
 
 const closeBrowser = async ({ preserveTask = false } = {}) => {
     const activeSession = getActiveBrowserSession();
-    if (activeSession.browser) {
-        await activeSession.browser.close();
-        console.log(`Browser closed for ${activeSession.accountName || activeSession.accountKey}.`);
+    activeSession.intentionalBrowserClose = true;
+    try {
+        if (activeSession.browser) {
+            await activeSession.browser.close().catch(error => {
+                console.log(`Browser close failed for ${activeSession.accountName || activeSession.accountKey}: ${error.message}`);
+            });
+            console.log(`Browser closed for ${activeSession.accountName || activeSession.accountKey}.`);
+        }
+    } finally {
+        activeSession.intentionalBrowserClose = false;
     }
 
-    activeSession.browser = null;
-    activeSession.context = null;
-    activeSession.page = null;
+    clearBrowserResources(activeSession);
     if (currentAccountKey === activeSession.accountKey) {
         currentAccountKey = null;
     }
@@ -1588,6 +1953,81 @@ const hideBrowserWindow = async () => {
     }
 };
 
+const clearBrowserResources = session => {
+    session.browser = null;
+    session.context = null;
+    session.page = null;
+    session.browserVisibleForManualVerification = false;
+};
+
+const recordUnexpectedBrowserClose = (session, reason) => {
+    clearBrowserResources(session);
+    const task = session.currentTask;
+    if (!task || isFinalTask(task)) {
+        return;
+    }
+
+    const message = reason || 'Browser closed before the active action completed.';
+    task.phase = 'error';
+    task.error = message;
+    task.updatedAt = new Date().toISOString();
+    task.verificationRequired = false;
+    task.loginRequired = false;
+    task.verificationStage = null;
+    task.verificationBlocker = null;
+    session.manualVerification = null;
+    recordTaskEvent(task, 'browser-closed', {
+        status: 'failed',
+        error: message,
+        message,
+    });
+
+    if (task.contentKey || task.requestedContentKey || task.rowNumber || task.originalUrl || task.finalUrl) {
+        upsertDashboardPost({
+            account: task.accountName || task.accountKey || session.accountName || session.accountKey,
+            accountKey: task.accountKey || session.accountKey,
+            contentKey: task.contentKey || task.requestedContentKey || null,
+            rowNumber: task.rowNumber || null,
+            url: getTaskTargetUrl(task),
+            status: 'failed',
+            phase: 'error',
+            error: message,
+            startedAt: task.startedAt || null,
+            completedAt: null,
+        });
+    }
+};
+
+const installBrowserLifecycleHandlers = session => {
+    const browserRef = session.browser;
+    const pageRef = session.page;
+    if (browserRef?.on) {
+        browserRef.on('disconnected', () => {
+            if (session.browser !== browserRef) {
+                return;
+            }
+            const intentionalClose = Boolean(session.intentionalBrowserClose);
+            clearBrowserResources(session);
+            if (!intentionalClose) {
+                recordUnexpectedBrowserClose(session, 'Browser disconnected before the active action completed.');
+            }
+        });
+    }
+
+    if (pageRef?.on) {
+        pageRef.on('close', () => {
+            if (session.page !== pageRef) {
+                return;
+            }
+            session.page = null;
+            session.browserVisibleForManualVerification = false;
+            if (!session.intentionalBrowserClose) {
+                recordUnexpectedBrowserClose(session, 'Page closed before the active action completed.');
+            }
+        });
+    }
+};
+
 const launchBrowser = async storageState => {
     const activeSession = getActiveBrowserSession();
     const launchArgs = [`--window-size=${BROWSER_WINDOW_WIDTH},${BROWSER_WINDOW_HEIGHT}`];
@@ -1605,6 +2045,7 @@ const launchBrowser = async storageState => {
         viewport: BROWSER_VIEWPORT,
     });
     activeSession.page = await activeSession.context.newPage();
+    installBrowserLifecycleHandlers(activeSession);
     await hideBrowserWindow();
 };
 
@@ -1985,6 +2426,118 @@ const closeMessagesPanelIfOpen = async () => {
         await wait(450);
     }
 
+    return true;
+};
+
+const closeCommentPanelIfOpen = async () => {
+    const panel = await page.evaluate(() => {
+        const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+        const isVisible = element => {
+            if (!element || !(element instanceof Element)) {
+                return false;
+            }
+
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.right > 0
+                && rect.top < window.innerHeight
+                && rect.left < window.innerWidth
+                && style.display !== 'none'
+                && style.visibility !== 'hidden';
+        };
+        const rectToObject = rect => ({
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+        });
+
+        const panels = Array.from(document.querySelectorAll('[role="dialog"], aside, section'))
+            .filter(isVisible)
+            .map(element => ({ element, text: normalize(element.textContent), rect: element.getBoundingClientRect() }))
+            .filter(candidate => (
+                /comments|add a comment|comment as|post/i.test(candidate.text)
+                && !/new message|your messages|send message to start a chat|\bto:\s*search/i.test(candidate.text)
+                && candidate.rect.width >= 180
+                && candidate.rect.height >= 180
+            ))
+            .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
+
+        const commentPanel = panels[0];
+        if (!commentPanel) {
+            return null;
+        }
+
+        const { element, rect } = commentPanel;
+        const closeTarget = Array.from(element.querySelectorAll('button, [role="button"], svg, div, span'))
+            .filter(isVisible)
+            .map(candidate => {
+                const candidateRect = candidate.getBoundingClientRect();
+                const label = normalize([
+                    candidate.getAttribute('aria-label'),
+                    candidate.getAttribute('title'),
+                    candidate.textContent,
+                ].filter(Boolean).join(' '));
+                const nearTopRight = candidateRect.width <= 48
+                    && candidateRect.height <= 48
+                    && candidateRect.left >= rect.right - 96
+                    && candidateRect.top <= rect.top + 96;
+                return {
+                    element: candidate.closest('button, [role="button"]') || candidate,
+                    rect: candidateRect,
+                    label,
+                    nearTopRight,
+                };
+            })
+            .filter(candidate => /close|cancel|back/i.test(candidate.label) || candidate.nearTopRight)
+            .sort((a, b) => {
+                const labelScore = Number(/close/i.test(b.label)) - Number(/close/i.test(a.label));
+                if (labelScore) {
+                    return labelScore;
+                }
+                return b.rect.left - a.rect.left || a.rect.top - b.rect.top;
+            })[0];
+
+        if (closeTarget) {
+            const closeRect = closeTarget.rect;
+            return {
+                panelRect: rectToObject(rect),
+                closeRect: rectToObject(closeRect),
+            };
+        }
+
+        return {
+            panelRect: rectToObject(rect),
+            closeRect: {
+                left: Math.max(0, rect.right - 36),
+                top: Math.max(0, rect.top + 8),
+                right: Math.max(0, rect.right),
+                bottom: Math.max(0, rect.top + 44),
+                width: 36,
+                height: 36,
+            },
+        };
+    }).catch(() => null);
+
+    if (!panel?.panelRect) {
+        await page.keyboard.press('Escape').catch(() => null);
+        await wait(500);
+        return false;
+    }
+
+    const closeRect = panel.closeRect || panel.panelRect;
+    await page.mouse.click(
+        closeRect.left + Math.max(6, closeRect.width / 2),
+        closeRect.top + Math.max(6, closeRect.height / 2),
+    ).catch(() => null);
+    await wait(800);
+    await page.keyboard.press('Escape').catch(() => null);
+    await wait(700);
     return true;
 };
 
@@ -2426,6 +2979,504 @@ const clickEnabledLoginSubmit = async passwordInput => {
     await passwordInput.press('Enter');
 };
 
+const clickLoginSubmitFallback = async () => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+        const clicked = await page.evaluate(() => {
+            const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const isVisible = element => {
+                if (!element || !(element instanceof Element)) {
+                    return false;
+                }
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0
+                    && rect.height > 0
+                    && rect.bottom > 0
+                    && rect.right > 0
+                    && rect.top < window.innerHeight
+                    && rect.left < window.innerWidth
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+
+            const candidates = Array.from(document.querySelectorAll('button, [role="button"], div[tabindex], span[tabindex]'))
+                .filter(isVisible)
+                .filter(element => element.getAttribute('aria-disabled') !== 'true' && !element.disabled)
+                .map(element => ({
+                    element,
+                    text: normalize([
+                        element.getAttribute('aria-label'),
+                        element.getAttribute('title'),
+                        element.textContent,
+                    ].filter(Boolean).join(' ')),
+                    rect: element.getBoundingClientRect(),
+                    type: normalize(element.getAttribute('type')),
+                }))
+                .filter(candidate => candidate.type === 'submit' || candidate.text === 'log in' || candidate.text === 'login')
+                .sort((a, b) => {
+                    const score = candidate => (
+                        (candidate.type === 'submit' ? -200 : 0)
+                        + (candidate.text === 'log in' ? -100 : 0)
+                        + Math.min(candidate.rect.width * candidate.rect.height, 10000) / 100
+                    );
+                    return score(a) - score(b) || a.rect.top - b.rect.top || a.rect.left - b.rect.left;
+                });
+
+            const target = candidates[0]?.element;
+            if (!target) {
+                return false;
+            }
+            target.click();
+            return true;
+        }).catch(() => false);
+
+        if (clicked) {
+            return true;
+        }
+        await wait(500);
+    }
+
+    return false;
+};
+
+const getLoginFieldStateByDom = async ({ accountName = '', password = '' } = {}) => {
+    return page.evaluate(({ accountName, password }) => {
+        const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const normalizeAccount = value => normalize(value).replace(/^@/, '');
+        const isVisible = element => {
+            if (!element || !(element instanceof HTMLInputElement)) {
+                return false;
+            }
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.right > 0
+                && rect.top < window.innerHeight
+                && rect.left < window.innerWidth
+                && style.display !== 'none'
+                && style.visibility !== 'hidden';
+        };
+        const rectToObject = rect => ({
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+        });
+        const getInputText = input => normalize([
+            input.name,
+            input.id,
+            input.type,
+            input.placeholder,
+            input.getAttribute('aria-label'),
+            input.autocomplete,
+        ].filter(Boolean).join(' '));
+        const getFieldSummary = field => ({
+            index: field.index,
+            type: field.type || '',
+            name: field.name || '',
+            placeholder: field.placeholder || '',
+            autocomplete: field.autocomplete || '',
+            ariaLabel: field.ariaLabel || '',
+            top: field.rect.top,
+            left: field.rect.left,
+            width: field.rect.width,
+            height: field.rect.height,
+        });
+
+        const fields = Array.from(document.querySelectorAll('input'))
+            .filter(isVisible)
+            .map((input, index) => {
+                const rect = input.getBoundingClientRect();
+                return {
+                    input,
+                    index,
+                    type: normalize(input.getAttribute('type') || 'text'),
+                    name: input.getAttribute('name') || '',
+                    placeholder: input.getAttribute('placeholder') || '',
+                    ariaLabel: input.getAttribute('aria-label') || '',
+                    autocomplete: normalize(input.getAttribute('autocomplete') || ''),
+                    text: getInputText(input),
+                    value: input.value || '',
+                    disabled: Boolean(input.disabled),
+                    readOnly: Boolean(input.readOnly),
+                    rect: rectToObject(rect),
+                };
+            });
+
+        const inputSummaries = fields.map(getFieldSummary);
+        const isTextLike = field => ['', 'text', 'email', 'tel'].includes(field.type);
+        const passwordCandidates = fields
+            .map(field => {
+                let score = 0;
+                if (field.disabled || field.readOnly) {
+                    score -= 1000;
+                }
+                if (field.type === 'password') {
+                    score += 300;
+                }
+                if (/password|\bpass\b|current-password/.test(field.text)) {
+                    score += 140;
+                }
+                if (field.autocomplete === 'current-password') {
+                    score += 90;
+                }
+                if (/webauthn|one-time-code|otp|search|verification/.test(field.text)) {
+                    score -= 250;
+                }
+                return { field, score };
+            })
+            .filter(candidate => candidate.score > 0)
+            .sort((a, b) => b.score - a.score || a.field.rect.top - b.field.rect.top || a.field.index - b.field.index);
+
+        const passwordField = passwordCandidates[0]?.field || null;
+        const usernameCandidates = fields
+            .filter(field => field.input !== passwordField?.input && field.type !== 'password')
+            .map(field => {
+                let score = 0;
+                if (field.disabled || field.readOnly) {
+                    score -= 1000;
+                }
+                if (isTextLike(field)) {
+                    score += 45;
+                } else {
+                    score -= 100;
+                }
+                if (/username|email|e-mail|mobile|phone/.test(field.text)) {
+                    score += 170;
+                }
+                if (/\blogin\b|\buser\b/.test(field.text)) {
+                    score += 70;
+                }
+                if (field.autocomplete === 'username') {
+                    score += 170;
+                }
+                if (['email', 'tel'].includes(field.autocomplete)) {
+                    score += 90;
+                }
+                if (/webauthn|one-time-code|otp|search|verification|captcha/.test(field.text)) {
+                    score -= 250;
+                }
+                if (accountName && normalizeAccount(field.value) === normalizeAccount(accountName)) {
+                    score += 100;
+                }
+                if (passwordField) {
+                    const distanceFromPassword = Math.abs(field.rect.top - passwordField.rect.top);
+                    if (field.rect.top <= passwordField.rect.top + 4) {
+                        score += 70;
+                    } else {
+                        score -= 120;
+                    }
+                    score -= Math.min(distanceFromPassword, 320) / 8;
+                }
+                return { field, score };
+            })
+            .filter(candidate => candidate.score > 20)
+            .sort((a, b) => {
+                if (b.score !== a.score) {
+                    return b.score - a.score;
+                }
+                if (passwordField) {
+                    return Math.abs(a.field.rect.top - passwordField.rect.top)
+                        - Math.abs(b.field.rect.top - passwordField.rect.top);
+                }
+                return a.field.index - b.field.index;
+            });
+
+        const usernameField = usernameCandidates[0]?.field || null;
+        const usernameValue = usernameField?.value || '';
+        const passwordValue = passwordField?.value || '';
+        const expectedAccount = normalizeAccount(accountName);
+        const success = Boolean(usernameField && passwordField && usernameField.input !== passwordField.input);
+
+        return {
+            success,
+            usernameIndex: usernameField?.index ?? null,
+            passwordIndex: passwordField?.index ?? null,
+            usernameRect: usernameField ? usernameField.rect : null,
+            passwordRect: passwordField ? passwordField.rect : null,
+            usernameValueLength: usernameValue.length,
+            passwordValueLength: passwordValue.length,
+            usernameMatchesExpected: Boolean(success && expectedAccount && normalizeAccount(usernameValue) === expectedAccount),
+            passwordMatchesExpected: Boolean(success && password && passwordValue === password),
+            usernameContainsPassword: Boolean(success && password && usernameValue.includes(password)),
+            inputs: inputSummaries,
+        };
+    }, { accountName, password }).catch(error => ({ success: false, error: error.message }));
+};
+
+const setLoginFieldsByDomIndex = async ({ usernameIndex, passwordIndex, accountName, password }) => {
+    return page.evaluate(({ usernameIndex, passwordIndex, accountName, password }) => {
+        const isVisible = element => {
+            if (!element || !(element instanceof HTMLInputElement)) {
+                return false;
+            }
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.right > 0
+                && rect.top < window.innerHeight
+                && rect.left < window.innerWidth
+                && style.display !== 'none'
+                && style.visibility !== 'hidden';
+        };
+        const setNativeValue = (input, value) => {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            input.focus();
+            if (setter) {
+                setter.call(input, value);
+            } else {
+                input.value = value;
+            }
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+
+        const inputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+        const usernameInput = inputs[usernameIndex];
+        const passwordInput = inputs[passwordIndex];
+
+        if (!usernameInput || !passwordInput || usernameInput === passwordInput) {
+            return {
+                success: false,
+                inputs: inputs.map(input => ({
+                    type: input.type || '',
+                    name: input.name || '',
+                    placeholder: input.placeholder || '',
+                    autocomplete: input.autocomplete || '',
+                })),
+            };
+        }
+
+        setNativeValue(usernameInput, accountName);
+        setNativeValue(passwordInput, password);
+        return {
+            success: true,
+        };
+    }, { usernameIndex, passwordIndex, accountName, password }).catch(error => ({ success: false, error: error.message }));
+};
+
+const clearLoginFieldsByDom = async () => {
+    return page.evaluate(() => {
+        const isVisible = element => {
+            if (!element || !(element instanceof HTMLInputElement)) {
+                return false;
+            }
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.right > 0
+                && rect.top < window.innerHeight
+                && rect.left < window.innerWidth
+                && style.display !== 'none'
+                && style.visibility !== 'hidden';
+        };
+        const setNativeValue = input => {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            input.focus();
+            if (setter) {
+                setter.call(input, '');
+            } else {
+                input.value = '';
+            }
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+
+        const loginFieldPattern = /username|email|e-mail|mobile|phone|login|password|\bpass\b/i;
+        Array.from(document.querySelectorAll('input'))
+            .filter(isVisible)
+            .filter(input => {
+                const type = (input.getAttribute('type') || 'text').toLowerCase();
+                const text = [
+                    input.name,
+                    input.id,
+                    input.placeholder,
+                    input.getAttribute('aria-label'),
+                    input.autocomplete,
+                ].filter(Boolean).join(' ');
+                return ['text', 'email', 'tel', 'password', ''].includes(type) || loginFieldPattern.test(text);
+            })
+            .forEach(setNativeValue);
+
+        return true;
+    }).catch(() => false);
+};
+
+const verifyLoginFieldsBeforeSubmit = async ({ accountName, password, strategy }) => {
+    let state = null;
+
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+        state = await getLoginFieldStateByDom({ accountName, password });
+        if (state.success && state.usernameMatchesExpected && state.passwordMatchesExpected && !state.usernameContainsPassword) {
+            return { success: true, state };
+        }
+        await wait(250);
+    }
+
+    const issues = [];
+    if (!state?.success) {
+        issues.push('login fields not identified');
+    }
+    if (!state?.usernameMatchesExpected) {
+        issues.push(`username mismatch (length ${state?.usernameValueLength ?? 0})`);
+    }
+    if (!state?.passwordMatchesExpected) {
+        issues.push(`password mismatch (length ${state?.passwordValueLength ?? 0})`);
+    }
+    if (state?.usernameContainsPassword) {
+        issues.push('password text appeared in username field');
+    }
+
+    const error = `${strategy} did not place credentials into the expected login fields: ${issues.join(', ') || 'unknown issue'}`;
+    console.log(`Blocked Instagram login submit for ${accountName}: ${error}.`);
+    return { success: false, state, error };
+};
+
+const fillLoginInputsByDom = async ({ accountName, password }) => {
+    const state = await getLoginFieldStateByDom({ accountName, password });
+    if (!state.success) {
+        return state;
+    }
+
+    const result = await setLoginFieldsByDomIndex({
+        usernameIndex: state.usernameIndex,
+        passwordIndex: state.passwordIndex,
+        accountName,
+        password,
+    });
+
+    if (!result.success) {
+        return result;
+    }
+
+    await wait(500);
+    const verification = await verifyLoginFieldsBeforeSubmit({ accountName, password, strategy: 'DOM login fill' });
+    if (!verification.success) {
+        await clearLoginFieldsByDom();
+        return {
+            success: false,
+            error: verification.error,
+            inputs: verification.state?.inputs || state.inputs,
+        };
+    }
+
+    await wait(300);
+    const clickedSubmit = await clickLoginSubmitFallback();
+    if (!clickedSubmit) {
+        await page.keyboard.press('Enter').catch(() => null);
+    }
+    return { ...result, clickedSubmit, strategy: 'dom' };
+};
+
+const getLoginInputRectsByDom = async () => {
+    const state = await getLoginFieldStateByDom();
+    if (!state.success) {
+        return state;
+    }
+
+    return {
+        success: true,
+        usernameRect: state.usernameRect,
+        passwordRect: state.passwordRect,
+        usernameIndex: state.usernameIndex,
+        passwordIndex: state.passwordIndex,
+        inputs: state.inputs,
+    };
+};
+
+const fillLoginInputsByKeyboardFallback = async ({ accountName, password }) => {
+    const result = await getLoginInputRectsByDom();
+    if (!result.success) {
+        return result;
+    }
+
+    await clearLoginFieldsByDom();
+
+    const typeIntoRect = async (rect, value, expectedIndex, label) => {
+        await page.mouse.click(rect.left + Math.min(Math.max(rect.width * 0.08, 18), rect.width / 2), rect.top + rect.height / 2);
+        await wait(250);
+        const focusedExpectedInput = await page.evaluate(({ expectedIndex }) => {
+            const isVisible = element => {
+                if (!element || !(element instanceof HTMLInputElement)) {
+                    return false;
+                }
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0
+                    && rect.height > 0
+                    && rect.bottom > 0
+                    && rect.right > 0
+                    && rect.top < window.innerHeight
+                    && rect.left < window.innerWidth
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+            const inputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+            return inputs[expectedIndex] === document.activeElement;
+        }, { expectedIndex }).catch(() => false);
+
+        if (!focusedExpectedInput) {
+            throw new Error(`Keyboard fallback could not focus the ${label} input safely.`);
+        }
+
+        await page.keyboard.press('Control+A').catch(() => null);
+        await page.keyboard.press('Backspace').catch(() => null);
+        await page.keyboard.type(String(value), { delay: 25 });
+        await wait(250);
+    };
+
+    try {
+        await typeIntoRect(result.usernameRect, accountName, result.usernameIndex, 'username');
+        const usernameCheck = await getLoginFieldStateByDom({ accountName, password: '' });
+        if (!usernameCheck.success || !usernameCheck.usernameMatchesExpected) {
+            await clearLoginFieldsByDom();
+            return {
+                success: false,
+                error: 'Keyboard fallback typed into the wrong username field.',
+                inputs: usernameCheck.inputs || result.inputs,
+            };
+        }
+
+        await typeIntoRect(result.passwordRect, password, result.passwordIndex, 'password');
+    } catch (error) {
+        await clearLoginFieldsByDom();
+        return {
+            success: false,
+            error: error.message,
+            inputs: result.inputs,
+        };
+    }
+
+    await wait(500);
+    const verification = await verifyLoginFieldsBeforeSubmit({ accountName, password, strategy: 'Keyboard login fill' });
+    if (!verification.success) {
+        await clearLoginFieldsByDom();
+        return {
+            success: false,
+            error: verification.error,
+            inputs: verification.state?.inputs || result.inputs,
+        };
+    }
+
+    await wait(300);
+    const clickedSubmit = await clickLoginSubmitFallback();
+    if (!clickedSubmit) {
+        await page.keyboard.press('Enter').catch(() => null);
+    }
+
+    return {
+        success: true,
+        strategy: 'keyboard',
+        clickedSubmit,
+    };
+};
+
 
 const fillAndSubmitLoginForm = async ({ accountName, password }) => {
     let lastError = null;
@@ -2435,6 +3486,16 @@ const fillAndSubmitLoginForm = async ({ accountName, password }) => {
 
         if (!usernameInput || !passwordInput) {
             const visibleInputs = await getVisibleInputDetails();
+            const domFillResult = await fillLoginInputsByDom({ accountName, password });
+            if (domFillResult.success) {
+                console.log(`Filled Instagram login form through DOM fallback for ${accountName}. Submit clicked: ${Boolean(domFillResult.clickedSubmit)}.`);
+                return;
+            }
+            const keyboardFillResult = await fillLoginInputsByKeyboardFallback({ accountName, password });
+            if (keyboardFillResult.success) {
+                console.log(`Filled Instagram login form through keyboard fallback for ${accountName}. Submit clicked: ${Boolean(keyboardFillResult.clickedSubmit)}.`);
+                return;
+            }
             lastError = new Error(`Could not find visible Instagram username/password inputs. Visible inputs: ${JSON.stringify(visibleInputs)}`);
             await wait(1200);
             continue;
@@ -2444,7 +3505,24 @@ const fillAndSubmitLoginForm = async ({ accountName, password }) => {
             await usernameInput.fill(accountName, { timeout: 7000 });
             await wait(400);
             await passwordInput.fill(password, { timeout: 7000 });
-            await wait(700);
+            await wait(500);
+            const verification = await verifyLoginFieldsBeforeSubmit({ accountName, password, strategy: 'Locator login fill' });
+            if (!verification.success) {
+                await clearLoginFieldsByDom();
+                const domFillResult = await fillLoginInputsByDom({ accountName, password });
+                if (domFillResult.success) {
+                    console.log(`Filled Instagram login form through verified DOM fallback for ${accountName}. Submit clicked: ${Boolean(domFillResult.clickedSubmit)}.`);
+                    return;
+                }
+                const keyboardFillResult = await fillLoginInputsByKeyboardFallback({ accountName, password });
+                if (keyboardFillResult.success) {
+                    console.log(`Filled Instagram login form through verified keyboard fallback for ${accountName}. Submit clicked: ${Boolean(keyboardFillResult.clickedSubmit)}.`);
+                    return;
+                }
+                throw new Error(verification.error);
+            }
+
+            await wait(300);
             await clickEnabledLoginSubmit(passwordInput);
             return;
         } catch (error) {
@@ -2455,6 +3533,114 @@ const fillAndSubmitLoginForm = async ({ accountName, password }) => {
     }
 
     throw lastError || new Error('Could not fill Instagram login form.');
+};
+
+const getVisibleInstagramLoginError = async () => {
+    const bodyText = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    return bodyText
+        .split('\n')
+        .map(line => line.trim())
+        .find(line => /incorrect|wrong|couldn'?t|try again|problem|challenge|suspicious|disabled|locked/i.test(line))
+        || null;
+};
+
+const submitCredentialsOnAnyLoginSurface = async ({ accountName, password, stage = 'login' }) => {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+        await dismissInstagramDialogs();
+        await throwIfInstagramBlocked(stage);
+
+        if (!await isLoginFormVisible()) {
+            const clicked = await clickLoginEntryPoint();
+            if (!clicked || attempt % 2 === 0) {
+                await page.goto(INSTAGRAM_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(error => {
+                    lastError = error;
+                    console.log(`Could not reopen Instagram login on attempt ${attempt}: ${error.message}`);
+                });
+            }
+            await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => null);
+            await wait(1600);
+            await dismissInstagramDialogs();
+        }
+
+        try {
+            await fillAndSubmitLoginForm({ accountName, password });
+            return;
+        } catch (error) {
+            lastError = error;
+            console.log(`Credential login attempt ${attempt} failed for ${accountName}: ${error.message}`);
+            const visibleError = await getVisibleInstagramLoginError();
+            if (visibleError) {
+                throw createAutomaticLoginFailureError(`Instagram rejected automatic login for "${accountName}": ${visibleError}`);
+            }
+            await wait(1200);
+        }
+    }
+
+    throw createAutomaticLoginFailureError(
+        `Automatic login could not find a usable Instagram username/password form for "${accountName}" after retrying. Last error: ${lastError?.message || 'none'}`,
+    );
+};
+
+const confirmCredentialLoginCompleted = async ({ accountName, stage = 'login' }) => {
+    await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => null);
+    await wait(8000);
+    await dismissInstagramDialogs();
+
+    const blocker = await getInstagramBlocker();
+    if (blocker) {
+        const task = await markCurrentTaskPaused({
+            phase: 'manual-verification',
+            blocker,
+            stage,
+        });
+        throw createManualVerificationError({ stage, blocker, task });
+    }
+
+    if (await isLoggedIn()) {
+        return;
+    }
+
+    const loginError = await getVisibleInstagramLoginError();
+    throw createAutomaticLoginFailureError(
+        loginError
+            ? `Instagram rejected automatic login for "${accountName}": ${loginError}`
+            : `Automatic login submitted credentials for "${accountName}", but Instagram did not create a logged-in session.`,
+    );
+};
+
+const submitCredentialsAndConfirmLogin = async ({ accountName, password, stage = 'login', maxAttempts = 3 }) => {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+            await submitCredentialsOnAnyLoginSurface({ accountName, password, stage });
+            await confirmCredentialLoginCompleted({ accountName, stage });
+            return true;
+        } catch (error) {
+            lastError = error;
+            if (error?.manualVerification) {
+                throw error;
+            }
+
+            const visibleError = await getVisibleInstagramLoginError();
+            const loginFormVisible = await isLoginFormVisible().catch(() => false);
+            const retryableBlankLoginForm = error?.automaticLoginFailure
+                && /did not create a logged-in session/i.test(error.message)
+                && loginFormVisible
+                && !visibleError;
+
+            if (!retryableBlankLoginForm || attempt >= maxAttempts) {
+                throw error;
+            }
+
+            console.log(`Instagram returned ${accountName} to a blank login form after submit; retrying credential entry (${attempt + 1}/${maxAttempts}).`);
+            await wait(1800);
+        }
+    }
+
+    throw lastError || createAutomaticLoginFailureError(`Automatic login did not complete for "${accountName}".`);
 };
 
 const saveSession = async sessionFile => {
@@ -2489,48 +3675,14 @@ const loginAndSaveSession = async ({ accountName, password, sessionFile }) => {
     await page.goto(INSTAGRAM_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
     try {
-        await ensureLoginFormReady();
-        await fillAndSubmitLoginForm({ accountName, password });
+        await submitCredentialsAndConfirmLogin({ accountName, password, stage: 'login' });
     } catch (error) {
         if (error?.manualVerification) {
             throw error;
         }
-
-        const task = await markCurrentTaskPaused({
-            phase: 'login-needed',
-            message: `Manual Instagram login required for "${accountName}". Automatic login could not finish: ${error.message}`,
-            loginRequired: true,
-            stage: 'login',
-        });
-        throw createManualVerificationError({ stage: 'login', blocker: task.error, task });
-    }
-
-    await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => null);
-    await wait(8000);
-    await dismissInstagramDialogs();
-
-    const blocker = await getInstagramBlocker();
-    if (blocker) {
-        const task = await markCurrentTaskPaused({
-            phase: 'manual-verification',
-            blocker,
-            stage: 'login',
-        });
-        throw createManualVerificationError({ stage: 'login', blocker, task });
-    }
-
-    if (!await isLoggedIn()) {
-        const bodyText = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
-        const loginError = bodyText
-            .split('\n')
-            .find(line => /incorrect|wrong|couldn'?t|try again|problem/i.test(line));
-        const task = await markCurrentTaskPaused({
-            phase: 'login-needed',
-            message: loginError || 'Automatic login did not complete. Complete login manually in the visible Instagram browser, then save the session.',
-            loginRequired: true,
-            stage: 'login',
-        });
-        throw createManualVerificationError({ stage: 'login', blocker: task.error, task });
+        throw error.disableManualFallback
+            ? error
+            : createAutomaticLoginFailureError(`Automatic login could not submit credentials for "${accountName}": ${error.message}`);
     }
 
     await saveSession(sessionFile);
@@ -2571,46 +3723,18 @@ const loginCurrentBrowserAndSaveSession = async ({ session, password, stage = 'l
     await page.goto(INSTAGRAM_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
 
     try {
-        await ensureLoginFormReady();
-        await fillAndSubmitLoginForm({ accountName: session.accountName || session.accountKey, password });
+        await submitCredentialsAndConfirmLogin({
+            accountName: session.accountName || session.accountKey,
+            password,
+            stage,
+        });
     } catch (error) {
         if (error?.manualVerification) {
             throw error;
         }
-        const task = await markCurrentTaskPaused({
-            phase: 'login-needed',
-            message: `Manual Instagram login required for "${session.accountName || session.accountKey}". Automatic login could not finish: ${error.message}`,
-            loginRequired: true,
-            stage,
-            session,
-        });
-        throw createManualVerificationError({ stage, blocker: task.error, task });
-    }
-
-    await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => null);
-    await wait(8000);
-    await dismissInstagramDialogs();
-
-    const blocker = await getInstagramBlocker();
-    if (blocker) {
-        const task = await markCurrentTaskPaused({
-            phase: 'manual-verification',
-            blocker,
-            stage,
-            session,
-        });
-        throw createManualVerificationError({ stage, blocker, task });
-    }
-
-    if (!await isLoggedIn()) {
-        const task = await markCurrentTaskPaused({
-            phase: 'login-needed',
-            message: 'Instagram is still not logged in. Complete login manually in the visible browser, then the controller will continue.',
-            loginRequired: true,
-            stage,
-            session,
-        });
-        throw createManualVerificationError({ stage, blocker: task.error, task });
+        throw error.disableManualFallback
+            ? error
+            : createAutomaticLoginFailureError(`Automatic login could not submit credentials for "${session.accountName || session.accountKey}": ${error.message}`);
     }
 
     const sessionFile = getSessionFileForAccountKey(session.accountKey);
@@ -2834,6 +3958,9 @@ const findVisibleCommentComposer = async () => {
     }, COMMENT_COMPOSER_SELECTORS);
 };
 
+const isRealCommentComposerResult = composer => Boolean(composer && composer.source === 'input');
+const isCommentComposerHint = composer => Boolean(composer && ['placeholder', 'dialog-bottom'].includes(composer.source));
+
 const clickCommentComposer = async () => {
     const composer = await findVisibleCommentComposer();
 
@@ -2843,8 +3970,15 @@ const clickCommentComposer = async () => {
             : composer.rect.left + Math.min(52, Math.max(14, composer.rect.width * 0.22));
         const y = composer.rect.top + composer.rect.height / 2;
         await page.mouse.click(x, y);
-        await wait(350);
-        return await findVisibleCommentComposer().catch(() => null) || composer;
+        await wait(isCommentComposerHint(composer) ? 900 : 350);
+        const clickedComposer = await findVisibleCommentComposer().catch(() => null);
+        if (isRealCommentComposerResult(clickedComposer)) {
+            return clickedComposer;
+        }
+        if (isRealCommentComposerResult(composer)) {
+            return composer;
+        }
+        throw new Error(`Comment composer is only a non-editable ${composer.source} hint, not a real input yet.`);
     }
 
     const placeholder = page.getByText(/add a comment/i).last();
@@ -2860,49 +3994,53 @@ const clickCommentComposer = async () => {
     }
 
     await page.mouse.click(box.x + Math.min(65, Math.max(14, box.width * 0.18)), box.y + box.height / 2);
-    await wait(350);
+    await wait(900);
 
-    return await findVisibleCommentComposer().catch(() => null) || {
-        tag: 'TEXT',
-        placeholder: 'Add a comment',
-        ariaLabel: '',
-        role: '',
-        value: '',
-        rect: {
-            left: box.x,
-            top: box.y,
-            width: box.width,
-            height: box.height,
-        },
-    };
+    const clickedComposer = await findVisibleCommentComposer().catch(() => null);
+    if (isRealCommentComposerResult(clickedComposer)) {
+        return clickedComposer;
+    }
+
+    throw new Error('Add a comment placeholder is visible, but Instagram has not opened a real editable comment input yet.');
 };
 
-const waitForCommentComposer = async (timeoutMs = 12000) => {
+const waitForCommentComposer = async (timeoutMs = 12000, options = {}) => {
     const deadline = Date.now() + timeoutMs;
+    const returnHintAfterMs = Number(options.returnHintAfterMs) || 0;
     let fallbackComposer = null;
     let fallbackSeenAt = null;
-    const fallbackDelayMs = Math.min(12000, Math.max(3000, Math.floor(timeoutMs * 0.35)));
+    const fallbackDelayMs = Math.min(5000, Math.max(1500, Math.floor(timeoutMs * 0.18)));
 
     while (Date.now() < deadline) {
         const composer = await findVisibleCommentComposer();
         if (composer) {
-            if (composer.source !== 'dialog-bottom') {
+            if (isRealCommentComposerResult(composer)) {
                 return composer;
             }
 
-            fallbackComposer = composer;
-            fallbackSeenAt = fallbackSeenAt || Date.now();
-            if (Date.now() - fallbackSeenAt >= fallbackDelayMs) {
-                return fallbackComposer;
+            if (isCommentComposerHint(composer)) {
+                fallbackComposer = composer;
+                fallbackSeenAt = fallbackSeenAt || Date.now();
+                if (returnHintAfterMs && Date.now() - fallbackSeenAt >= returnHintAfterMs) {
+                    return {
+                        ...composer,
+                        staleHint: true,
+                    };
+                }
+                if (Date.now() - fallbackSeenAt >= fallbackDelayMs) {
+                    await page.mouse.click(
+                        composer.rect.left + Math.min(52, Math.max(14, composer.rect.width * 0.22)),
+                        composer.rect.top + composer.rect.height / 2,
+                    ).catch(() => null);
+                    fallbackSeenAt = Date.now();
+                }
             }
         }
 
         await wait(500);
     }
 
-    return fallbackSeenAt && Date.now() - fallbackSeenAt >= fallbackDelayMs
-        ? fallbackComposer
-        : null;
+    return null;
 };
 
 const openCommentComposer = async () => {
@@ -2917,7 +4055,6 @@ const openCommentComposer = async () => {
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
         const activeTask = getActiveTask();
-        const isReelTask = String(activeTask?.contentKey || activeTask?.requestedContentKey || activeTask?.originalUrl || '').includes('reel');
         const commentButton = await findPostActionButton('Comment') || await clickCommentActionFallback();
         if (!commentButton) {
             throw new Error('Could not find the visible Comment action button for this post/reel.');
@@ -2947,15 +4084,21 @@ const openCommentComposer = async () => {
             continue;
         }
 
-        const waitMs = isReelTask
-            ? Math.max(COMMENT_COMPOSER_OPEN_WAIT_MS, 45000)
-            : Math.max(COMMENT_COMPOSER_OPEN_WAIT_MS, 35000);
-        const composer = await waitForCommentComposer(waitMs);
-        if (composer) {
+        const waitMs = Math.max(COMMENT_COMPOSER_OPEN_WAIT_MS, 50000);
+        const hintRetryMs = Math.min(COMMENT_COMPOSER_HINT_RETRY_MS, waitMs);
+        const waitStartedAt = Date.now();
+        const composer = await waitForCommentComposer(waitMs, { returnHintAfterMs: hintRetryMs });
+        const waitedMs = Date.now() - waitStartedAt;
+        if (isRealCommentComposerResult(composer)) {
             return { alreadyOpen: false, composer, commentButton };
         }
 
-        console.log(`Comment panel/input still not ready for ${activeTask?.accountName || activeTask?.accountKey || 'account'} after ${waitMs}ms on attempt ${attempt}.`);
+        if (composer?.staleHint) {
+            console.log(`Comment composer stayed as non-editable ${composer.source} hint for ${hintRetryMs}ms; closing and retrying.`);
+        }
+        console.log(`Comment panel/input still not ready for ${activeTask?.accountName || activeTask?.accountKey || 'account'} after ${waitedMs}ms on attempt ${attempt}.`);
+        await closeCommentPanelIfOpen();
+        await wait(1800);
     }
 
     throw new Error(`Comment panel/input did not appear after clicking Comment. Last button: ${JSON.stringify(lastCommentButton)}`);
@@ -3319,7 +4462,7 @@ const fillVisibleCommentInput = async comment => {
         const domFillResult = await setCommentComposerValue(comment);
         await wait(700);
         let value = await getVisibleCommentComposerValue();
-        console.log(`Visible comment input value after direct DOM fill: "${value}". DOM result: ${JSON.stringify(domFillResult)}`);
+        logDebug(`Visible comment input value after direct DOM fill: "${value}". DOM result: ${JSON.stringify(domFillResult)}`);
 
         if (commentValueEquals(value, comment)) {
             return domFillResult?.rect || {
@@ -3346,7 +4489,7 @@ const fillVisibleCommentInput = async comment => {
         await wait(1000);
 
         value = await getVisibleCommentComposerValue();
-        console.log(`Visible comment input value after direct fill: "${value}"`);
+        logDebug(`Visible comment input value after direct fill: "${value}"`);
 
         if (commentValueEquals(value, comment)) {
             return {
@@ -3361,7 +4504,7 @@ const fillVisibleCommentInput = async comment => {
         await wait(700);
 
         value = await getVisibleCommentComposerValue();
-        console.log(`Visible comment input value after locator fill: "${value}"`);
+        logDebug(`Visible comment input value after locator fill: "${value}"`);
 
         if (commentValueEquals(value, comment)) {
             return {
@@ -3383,7 +4526,7 @@ const fillActiveCommentBox = async comment => {
     for (let attempt = 1; attempt <= 4; attempt += 1) {
         const composer = await clickCommentComposer();
         lastComposer = composer;
-        console.log(`Clicked comment composer attempt ${attempt}: ${JSON.stringify(composer)}`);
+        logDebug(`Clicked comment composer attempt ${attempt}: ${JSON.stringify(composer)}`);
         await wait(900);
 
         await clearPageTextSelection();
@@ -3391,7 +4534,7 @@ const fillActiveCommentBox = async comment => {
         await wait(1000);
         await clearPageTextSelection();
         lastValue = await getVisibleCommentComposerValue();
-        console.log(`Visible comment box value after DOM fill attempt ${attempt}: "${lastValue}". DOM result: ${JSON.stringify(domFillResult)}`);
+        logDebug(`Visible comment box value after DOM fill attempt ${attempt}: "${lastValue}". DOM result: ${JSON.stringify(domFillResult)}`);
 
         if (commentValueEquals(lastValue, comment)) {
             return domFillResult?.rect || composer.rect;
@@ -3405,6 +4548,23 @@ const fillActiveCommentBox = async comment => {
 
         const activeComposer = await isActiveCommentComposer(composer?.rect || domFillResult?.rect || null);
         if (!activeComposer) {
+            if (composer?.source === 'dialog-bottom' && !normalizeCommentValue(lastValue)) {
+                await page.mouse.click(
+                    composer.rect.left + Math.min(52, Math.max(14, composer.rect.width * 0.22)),
+                    composer.rect.top + composer.rect.height / 2,
+                );
+                await wait(350);
+                await page.keyboard.insertText(comment);
+                await wait(900);
+                lastValue = await getVisibleCommentComposerValue();
+                logDebug(`Visible comment box value after dialog-bottom keyboard attempt ${attempt}: "${lastValue}"`);
+
+                if (commentValueEquals(lastValue, comment)) {
+                    await clearPageTextSelection();
+                    return composer.rect;
+                }
+            }
+
             console.log(`Skipping keyboard fill attempt ${attempt}; active element is not a verified comment composer.`);
             continue;
         }
@@ -3415,7 +4575,7 @@ const fillActiveCommentBox = async comment => {
         await wait(1200);
 
         lastValue = await getVisibleCommentComposerValue();
-        console.log(`Visible comment box value after keyboard attempt ${attempt}: "${lastValue}"`);
+        logDebug(`Visible comment box value after keyboard attempt ${attempt}: "${lastValue}"`);
 
         if (commentValueEquals(lastValue, comment)) {
             await clearPageTextSelection();
@@ -3917,6 +5077,55 @@ const clickPostActionButton = async label => {
     return button;
 };
 
+const waitForPostActionButton = async (label, timeoutMs = 12000) => {
+    const startedAt = Date.now();
+    let lastButton = null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+        lastButton = await findPostActionButton(label);
+        if (lastButton) {
+            return lastButton;
+        }
+
+        await wait(600);
+    }
+
+    return lastButton;
+};
+
+const verifyLikedOrContinue = async (session, task, stage = 'like') => {
+    const verifiedUnlike = await waitForPostActionButton('Unlike', 14000);
+    if (verifiedUnlike) {
+        if (task) {
+            task.likeButtonRect = verifiedUnlike.clickRect;
+            task.likeVerification = {
+                verified: true,
+                stage,
+                at: new Date().toISOString(),
+            };
+        }
+        return verifiedUnlike;
+    }
+
+    const visibleLike = await findPostActionButton('Like');
+    const message = visibleLike
+        ? `${stage}: Instagram still shows Like after click; continuing to comment and using comment visibility as final proof.`
+        : `${stage}: Instagram did not expose Like/Unlike after click; continuing to comment and using comment visibility as final proof.`;
+    console.log(`${message} Account: ${session.accountName || session.accountKey}.`);
+    if (task) {
+        task.likeVerification = {
+            verified: false,
+            warning: message,
+            stage,
+            at: new Date().toISOString(),
+        };
+        task.warning = message;
+        task.updatedAt = new Date().toISOString();
+    }
+
+    return null;
+};
+
 const clickCommentActionFallback = async () => {
     const activeTask = getActiveTask();
     const isReelTask = String(activeTask?.contentKey || activeTask?.requestedContentKey || activeTask?.originalUrl || '').includes('reel');
@@ -4089,6 +5298,36 @@ const ensureBrowserReadyForAction = async (session, payload = {}, defaults = {},
     throw createManualVerificationError({ stage, blocker: pausedTask.error, task: pausedTask });
 };
 
+const isClosedBrowserError = error => /target page.*closed|target .*closed|context.*closed|browser.*closed|page.*closed|has been closed|browser not started/i.test(String(error?.message || error || ''));
+
+const gotoWithBrowserRecovery = async (session, payload, url, stage = 'navigation', defaults = {}) => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+        await ensureBrowserReadyForAction(session, payload, {
+            ...defaults,
+            url,
+            contentKey: defaults.contentKey || getInstagramContentKey(url),
+        }, `${stage} browser recovery`);
+
+        try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            return attempt > 1 ? 'recovered' : 'ok';
+        } catch (error) {
+            lastError = error;
+            if (attempt >= 2 || !isClosedBrowserError(error)) {
+                throw error;
+            }
+
+            appendRuntimeErrorLog(`${stage} retry after closed browser`, error);
+            await closeBrowser({ preserveTask: true }).catch(closeError => {
+                console.log(`Could not clear closed browser before ${stage} retry: ${closeError.message}`);
+            });
+        }
+    }
+
+    throw lastError || new Error(`${stage} failed before navigation could complete.`);
+};
+
 const ensureTaskTargetPage = async (task, stage = 'action') => {
     if (!task || !isPageOpen()) {
         return false;
@@ -4221,6 +5460,14 @@ const submitCommentForActiveTask = async (session, comment, stageLabel = 'commen
             lastError = error;
             console.log(`${stageLabel} attempt ${attempt} failed for ${session.accountName}: ${error.message}`);
             if (attempt < 3) {
+                if (/Comment text was not inserted|Comment composer was not exact before posting|non-editable .*hint|not opened a real editable comment input/i.test(error.message)) {
+                    await closeCommentPanelIfOpen();
+                    await closeMessagesPanelIfOpen();
+                    await clearPageTextSelection();
+                    await wait(1800);
+                    continue;
+                }
+
                 await reloadTaskTargetPage(task, `${stageLabel} retry ${attempt + 1}`).catch(reloadError => {
                     console.log(`Could not reload target before retry: ${reloadError.message}`);
                 });
@@ -4272,6 +5519,7 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
         account: task.accountName || task.accountKey,
         accountKey: task.accountKey,
         contentKey: task.contentKey,
+        rowNumber: task.rowNumber || null,
         url,
         comment: finalComment,
         status: 'running',
@@ -4303,6 +5551,7 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
         account: task.accountName || task.accountKey,
         accountKey: task.accountKey,
         contentKey: task.contentKey,
+        rowNumber: task.rowNumber || null,
         url: task.originalUrl,
         comment: finalComment,
         status: 'running',
@@ -4376,13 +5625,15 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
             await dismissInstagramDialogs();
             await throwIfInstagramBlocked('queued like retry verification');
         }
-        const verifiedUnlike = await findPostActionButton('Unlike');
-        if (!verifiedUnlike) {
-            throw new Error('Clicked Like on queued task, but Instagram did not show an Unlike button afterward.');
-        }
-        task.likeButtonRect = verifiedUnlike.clickRect;
+        await verifyLikedOrContinue(session, task, 'queued like verification');
     } else {
         task.likeButtonRect = existingUnlike.clickRect;
+        task.likeVerification = {
+            verified: true,
+            alreadyLiked: true,
+            stage: 'queued like',
+            at: new Date().toISOString(),
+        };
     }
 
     task.phase = 'liked';
@@ -4398,6 +5649,96 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
     const completedAction = await markCurrentTaskCompleted();
     await closeBrowserAfterCompletedTask(session, 'queued action completion');
     return completedAction;
+};
+
+const isQueuedActionReadyToRun = task => Boolean(
+    task
+    && !task.skip
+    && (task.originalUrl || task.finalUrl || task.contentKey || task.requestedContentKey || task.rowNumber)
+    && task.comment,
+);
+
+const markQueuedActionFailed = (session, queuedTask, error) => {
+    const task = getActiveTask() || queuedTask || {};
+    const message = error?.message || String(error);
+    task.accountKey = task.accountKey || queuedTask?.accountKey || session.accountKey;
+    task.accountName = task.accountName || queuedTask?.accountName || session.accountName || session.accountKey;
+    task.phase = 'error';
+    task.error = message;
+    task.updatedAt = new Date().toISOString();
+    removeQueuedActionTask(session, queuedTask);
+    upsertDashboardPost({
+        account: task.accountName || task.accountKey,
+        accountKey: task.accountKey,
+        contentKey: task.contentKey || task.requestedContentKey || queuedTask?.contentKey || queuedTask?.requestedContentKey || null,
+        rowNumber: task.rowNumber || queuedTask?.rowNumber || null,
+        url: getTaskTargetUrl(task) || queuedTask?.originalUrl || getInstagramUrlForContentKey(queuedTask?.contentKey || queuedTask?.requestedContentKey),
+        comment: task.comment || queuedTask?.comment || null,
+        status: 'failed',
+        phase: 'error',
+        error: message,
+        startedAt: task.startedAt || queuedTask?.startedAt || null,
+        completedAt: null,
+    });
+    recordTaskEvent(task, 'error', {
+        status: 'failed',
+        error: message,
+    });
+};
+
+const drainQueuedActionTasks = async (session, reason = 'queued action drain') => {
+    if (session.queuedActionDrainInFlight) {
+        return [];
+    }
+
+    session.queuedActionDrainInFlight = true;
+    const completedActions = [];
+    try {
+        while (true) {
+            const nextTask = (session.queuedActionTasks || []).find(isQueuedActionReadyToRun);
+            if (!nextTask) {
+                break;
+            }
+
+            try {
+                console.log(`Draining queued action for ${session.accountName || session.accountKey} after ${reason}.`);
+                const completedAction = await performQueuedActionTask(session, nextTask, nextTask.comment);
+                if (completedAction) {
+                    completedActions.push(completedAction);
+                }
+            } catch (error) {
+                console.log(`Queued action failed for ${session.accountName || session.accountKey}: ${error.message}`);
+                markQueuedActionFailed(session, nextTask, error);
+                break;
+            }
+        }
+    } finally {
+        session.queuedActionDrainInFlight = false;
+    }
+
+    return completedActions;
+};
+
+const scheduleQueuedActionDrain = (session, reason = 'completed action') => {
+    if (session.queuedActionDrainScheduled || session.queuedActionDrainInFlight) {
+        return false;
+    }
+    if (!(session.queuedActionTasks || []).some(isQueuedActionReadyToRun)) {
+        return false;
+    }
+
+    session.queuedActionDrainScheduled = true;
+    setTimeout(() => {
+        runInBrowserSession(session, async () => {
+            session.queuedActionDrainScheduled = false;
+            await drainQueuedActionTasks(session, reason);
+        }, 'queued-drain').catch(error => {
+            session.queuedActionDrainScheduled = false;
+            appendRuntimeErrorLog(`Queued action drain failed for ${session.accountName || session.accountKey}`, error);
+        });
+    }, 0);
+
+    return true;
 };
 
 const getTaskCompletionContentKeys = task => {
@@ -4586,9 +5927,28 @@ const startManualVerificationAutoChecks = () => {
     }, MANUAL_VERIFICATION_CHECK_MS);
 };
 
+const hasDashboardVisibleSessionWork = session => {
+    const task = session.currentTask || null;
+    const pageOpen = Boolean(session.page && !session.page.isClosed());
+    const hasPendingWork = Boolean((session.pendingOperations || 0) > 0 || (session.queuedActionTasks || []).length);
+    const hasTarget = Boolean(
+        task?.contentKey
+        || task?.requestedContentKey
+        || task?.finalContentKey
+        || task?.originalUrl
+        || task?.finalUrl
+    );
+
+    if (!pageOpen && !hasPendingWork) {
+        return false;
+    }
+
+    return Boolean(pageOpen || hasPendingWork || hasTarget);
+};
+
 const getActiveSessionsSummary = () => {
     return Array.from(browserSessions.values())
-        .filter(session => session.currentTask || (session.page && !session.page.isClosed()))
+        .filter(hasDashboardVisibleSessionWork)
         .map(session => ({
             account: session.accountName || session.accountKey,
             accountKey: session.accountKey,
@@ -4648,7 +6008,11 @@ const getActionHistorySummary = ({ accountKey, contentKey, limit = 120 } = {}) =
 };
 
 app.use((req, _res, next) => {
-    console.log(`${req.method} ${req.path}`);
+    const importantRequest = req.method !== 'GET'
+        && !req.path.startsWith('/dashboard/posts');
+    if (LOG_HTTP_REQUESTS || importantRequest) {
+        console.log(`HTTP ${req.method} ${req.path}`);
+    }
     next();
 });
 
@@ -4964,7 +6328,19 @@ app.post('/browser/save-session', async (req, res) => {
 
         const session = getBrowserSession(accountKey, accountKey);
         await runInBrowserSession(session, async () => {
-            requirePage();
+            const payloadTarget = getActionTargetFromPayload(payload);
+            const rememberedPost = findRememberedDashboardPost({
+                accountKey,
+                contentKey: payloadTarget.contentKey,
+                rowNumber: payloadTarget.rowNumber,
+                url: payloadTarget.url,
+            });
+            await ensureBrowserReadyForAction(session, payload, {
+                url: payloadTarget.url || rememberedPost?.url || null,
+                contentKey: payloadTarget.contentKey || rememberedPost?.contentKey || null,
+                rowNumber: payloadTarget.rowNumber || rememberedPost?.rowNumber || null,
+                comment: payloadTarget.comment || rememberedPost?.comment || null,
+            }, 'save-session');
 
             const blocker = await getInstagramBlocker();
             if (blocker) {
@@ -5121,6 +6497,7 @@ app.post('/browser/navigate', async (req, res) => {
                 account: task.accountName || task.accountKey,
                 accountKey: task.accountKey,
                 contentKey: task.contentKey,
+                rowNumber: task.rowNumber || null,
                 url,
                 status: 'running',
                 phase: 'navigating',
@@ -5130,7 +6507,11 @@ app.post('/browser/navigate', async (req, res) => {
 
             console.log(`Navigating ${session.accountName} to: ${url}`);
             await dismissInstagramDialogs();
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            const navigationRecovery = await gotoWithBrowserRecovery(session, payload, url, 'navigation', {
+                contentKey: requestedContentKey,
+                rowNumber: task.rowNumber || null,
+                comment: task.comment || null,
+            });
             await wait(8000);
             await dismissInstagramDialogs();
             await throwIfInstagramBlocked('navigation');
@@ -5152,6 +6533,7 @@ app.post('/browser/navigate', async (req, res) => {
                 account: task.accountName || task.accountKey,
                 accountKey: task.accountKey,
                 contentKey: task.contentKey,
+                rowNumber: task.rowNumber || null,
                 url: task.originalUrl,
                 status: 'running',
                 phase: 'loaded',
@@ -5178,6 +6560,7 @@ app.post('/browser/navigate', async (req, res) => {
                 contentKey: finalContentKey,
                 finalUrl,
                 redirected: task.redirected,
+                recoveredBrowser: navigationRecovery === 'recovered',
             });
         }, 'navigate');
     } catch (error) {
@@ -5257,7 +6640,7 @@ app.post('/browser/like', async (req, res) => {
                 }
             }
 
-            requirePage();
+            await ensureBrowserReadyForAction(session, payload, payloadTarget, 'like');
             console.log(`Looking for like button for ${session.accountName}...`);
             const task = getActiveTask();
             if (task) {
@@ -5280,6 +6663,12 @@ app.post('/browser/like', async (req, res) => {
                 console.log(`Post is already liked for ${session.accountName}. Unlike button: ${JSON.stringify(existingUnlike.clickRect)}`);
                 if (task) {
                     task.likeButtonRect = existingUnlike.clickRect;
+                    task.likeVerification = {
+                        verified: true,
+                        alreadyLiked: true,
+                        stage: 'like',
+                        at: new Date().toISOString(),
+                    };
                     task.phase = 'liked';
                     task.updatedAt = new Date().toISOString();
                     recordTaskEvent(task, 'liked', { status: 'running' });
@@ -5330,19 +6719,21 @@ app.post('/browser/like', async (req, res) => {
                 await dismissInstagramDialogs();
                 await throwIfInstagramBlocked('like retry verification');
             }
-            const verifiedUnlike = await findPostActionButton('Unlike');
-            if (!verifiedUnlike) {
-                throw new Error('Clicked Like, but Instagram did not show an Unlike button afterward.');
-            }
-
-            console.log(`Liked and verified for ${session.accountName}. Unlike button: ${JSON.stringify(verifiedUnlike.clickRect)}`);
+            const verifiedUnlike = await verifyLikedOrContinue(session, task, 'like verification');
+            console.log(verifiedUnlike
+                ? `Liked and verified for ${session.accountName}. Unlike button: ${JSON.stringify(verifiedUnlike.clickRect)}`
+                : `Like click was not visibly verified for ${session.accountName}; continuing workflow.`);
             if (task) {
-                task.likeButtonRect = verifiedUnlike.clickRect;
                 task.phase = 'liked';
                 task.updatedAt = new Date().toISOString();
                 recordTaskEvent(task, 'liked', { status: 'running' });
             }
-            res.json({ success: true, account: session.accountName });
+            res.json({
+                success: true,
+                account: session.accountName,
+                verified: Boolean(verifiedUnlike),
+                warning: verifiedUnlike ? null : task?.likeVerification?.warning || null,
+            });
         }, 'like');
     } catch (error) {
         console.error('Like error:', error.message);
@@ -5397,6 +6788,7 @@ app.post('/browser/comment', async (req, res) => {
                         actionStatus: 'done',
                         account: session.accountName,
                         completedAction: completedQueuedAction,
+                        ...completedActionSheetFields(completedQueuedAction),
                     });
                 }
                 return sendManualActionStillWaitingResponse(res, 'comment', getActiveTask() || activeBeforeComment, {
@@ -5445,6 +6837,7 @@ app.post('/browser/comment', async (req, res) => {
                             actionStatus: 'done',
                             account: session.accountName,
                             completedAction: completedQueuedAction,
+                            ...completedActionSheetFields(completedQueuedAction),
                         });
                     }
 
@@ -5476,6 +6869,7 @@ app.post('/browser/comment', async (req, res) => {
                             actionStatus: 'done',
                             account: session.accountName,
                             completedAction: completedQueuedAction,
+                            ...completedActionSheetFields(completedQueuedAction),
                         });
                     }
                     return res.json(queuedTaskResponse('comment', queuedTask, activeBeforeComment));
@@ -5507,6 +6901,7 @@ app.post('/browser/comment', async (req, res) => {
                     completedAction: completedRecoveredAction,
                     recoveredBrowser: true,
                     browserClosed: !isPageOpen(),
+                    ...completedActionSheetFields(completedRecoveredAction),
                 });
             }
 
@@ -5523,17 +6918,10 @@ app.post('/browser/comment', async (req, res) => {
 
             await submitCommentForActiveTask(session, comment, 'comment');
             const completedAction = await markCurrentTaskCompleted();
-            const nextReadyQueuedTask = (session.queuedActionTasks || []).find(task => task.comment);
-            let continuedQueuedAction = null;
-            if (nextReadyQueuedTask) {
-                console.log(`Continuing queued task for ${session.accountName} after completed comment.`);
-                continuedQueuedAction = await performQueuedActionTask(session, nextReadyQueuedTask, nextReadyQueuedTask.comment);
-            }
-            const browserClosed = continuedQueuedAction
-                ? !isPageOpen()
-                : await closeBrowserAfterCompletedTask(session, 'comment completion');
+            const queuedActionsWaiting = (session.queuedActionTasks || []).filter(task => task.comment).length;
+            const browserClosed = await closeBrowserAfterCompletedTask(session, 'comment completion');
+            const queuedDrainScheduled = scheduleQueuedActionDrain(session, 'comment completion');
 
-            await wait(3000);
             res.json({
                 success: true,
                 completed: true,
@@ -5541,8 +6929,10 @@ app.post('/browser/comment', async (req, res) => {
                 actionStatus: 'done',
                 account: session.accountName,
                 completedAction,
-                continuedQueuedAction,
+                queuedActionsWaiting,
                 browserClosed,
+                queuedDrainScheduled,
+                ...completedActionSheetFields(completedAction),
             });
         }, 'comment');
     } catch (error) {
@@ -5569,6 +6959,7 @@ app.post('/browser/comment', async (req, res) => {
                     actionStatus: 'done',
                     account: recoverySession.accountName || recoverySession.accountKey,
                     completedAction,
+                    ...completedActionSheetFields(completedAction),
                 });
             }
 

@@ -80,7 +80,7 @@ const getMonitorHtml = () => `<!doctype html>
       transition: border-color .18s ease, box-shadow .18s ease;
     }
     .card.running { border-color: rgba(88, 166, 255, .62); box-shadow: 0 0 0 1px rgba(88, 166, 255, .12), 0 12px 26px rgba(0, 0, 0, .22); }
-    .card.done { border-color: rgba(146, 155, 166, .26); box-shadow: 0 8px 22px rgba(0, 0, 0, .18); }
+    .card.done { border-color: rgba(63, 185, 80, .46); box-shadow: 0 0 0 1px rgba(63, 185, 80, .12), 0 8px 22px rgba(0, 0, 0, .18); }
     .card.failed { border-color: rgba(248, 81, 73, .48); }
     .card-head {
       display: grid;
@@ -148,7 +148,8 @@ const getMonitorHtml = () => `<!doctype html>
       color: var(--blue);
       border-color: rgba(88, 166, 255, .45);
     }
-    .pill.done, .pill.commented { color: #c8d0d8; border-color: rgba(146, 155, 166, .34); background: rgba(146, 155, 166, .08); }
+    .pill.queued { color: var(--warn); border-color: rgba(210, 153, 34, .45); }
+    .pill.done, .pill.commented { color: var(--ok); border-color: rgba(63, 185, 80, .45); background: rgba(63, 185, 80, .09); }
     .pill.failed, .pill.error { color: var(--bad); border-color: rgba(248, 81, 73, .48); }
     .preview-wrap {
       position: relative;
@@ -366,9 +367,9 @@ const getMonitorHtml = () => `<!doctype html>
     }
     .done-mark {
       color: var(--ok);
-      background: rgba(9, 13, 18, .78);
-      border: 1px solid rgba(63, 185, 80, .35);
-      box-shadow: 0 8px 20px rgba(0, 0, 0, .24);
+      background: rgba(9, 13, 18, .82);
+      border: 1px solid rgba(63, 185, 80, .46);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, .24), 0 0 0 1px rgba(63, 185, 80, .12);
     }
     .failed-mark {
       color: var(--bad);
@@ -522,7 +523,7 @@ const getMonitorHtml = () => `<!doctype html>
       const status = String(value || '').toLowerCase();
       if (['done', 'completed', 'commented', 'skipped'].includes(status)) return 'done';
       if (['failed', 'error'].includes(status)) return 'failed';
-      if (['running', 'active', 'working', 'navigating', 'loaded', 'liking', 'liked', 'commenting', 'ready', 'login', 'login-needed', 'starting', 'validating-session', 'verification', 'manual-verification', 'paused'].includes(status)) return 'running';
+      if (['running', 'active', 'working', 'queued', 'navigating', 'loaded', 'liking', 'liked', 'commenting', 'ready', 'login', 'login-needed', 'starting', 'validating-session', 'verification', 'manual-verification', 'paused'].includes(status)) return 'running';
       return 'pending';
     };
     const isManualPhase = value => ['login-needed', 'verification', 'manual-verification', 'paused'].includes(String(value || '').toLowerCase());
@@ -628,8 +629,8 @@ const getMonitorHtml = () => `<!doctype html>
         || isManualPhase(item.phase)
         || isManualMessage(task.error || item.error)
       ) return 'running';
-      if (task.error || item.error) return 'failed';
       if (task.skipped || task.phase === 'commented' || item.status === 'done' || item.phase === 'done' || item.phase === 'commented') return 'done';
+      if (task.error || item.error) return 'failed';
       if (item.session && (item.session.browserStarted || item.session.currentTask)) return 'running';
       return normalizeStatus(item.status);
     };
@@ -657,13 +658,44 @@ const getMonitorHtml = () => `<!doctype html>
 
     const hasVisibleSessionWork = session => {
       const task = session.currentTask || {};
-      return Boolean(
+      const hasTarget = Boolean(
         task.contentKey
         || task.requestedContentKey
+        || task.finalContentKey
         || task.originalUrl
         || task.finalUrl
+        || session.url
+      );
+      const hasQueuedWork = Boolean(Number(session.pendingOperations || 0) > 0 || Number(session.queuedOperations || 0) > 0);
+      const hasLiveManualWork = Boolean(
+        session.browserStarted
+        && (
+          session.manualVerification
+          || task.verificationRequired
+          || task.loginRequired
+          || isManualPhase(task.phase)
+          || isManualMessage(task.error)
+        )
+      );
+      const finalClosedPhase = ['ready', 'commented', 'done', 'completed', 'skipped'].includes(String(task.phase || '').toLowerCase());
+
+      if (!hasTarget) {
+        return false;
+      }
+
+      if (!session.browserStarted && !hasQueuedWork && !hasLiveManualWork) {
+        return false;
+      }
+
+      if (!session.browserStarted && finalClosedPhase) {
+        return false;
+      }
+
+      return Boolean(
+        hasTarget
+        || hasQueuedWork
+        || hasLiveManualWork
         || task.error
-        || task.phase
       );
     };
 
@@ -939,10 +971,11 @@ const getMonitorHtml = () => `<!doctype html>
       refs.pill.textContent = phase;
       refs.queue.textContent = queued ? 'Queue ' + queued : '';
       refs.queue.hidden = !queued;
-      refs.done.hidden = true;
+      refs.done.hidden = status !== 'done';
       refs.failed.hidden = status !== 'failed';
-      refs.error.textContent = task.error || item.error || '';
-      refs.error.hidden = !(task.error || item.error);
+      const visibleError = status === 'done' ? '' : (task.error || item.error || '');
+      refs.error.textContent = visibleError;
+      refs.error.hidden = !visibleError;
       refs.mediaName.textContent = visibleSubtitle;
       refs.rowTag.textContent = mediaKind;
       refs.rowTag.hidden = !mediaKind;
