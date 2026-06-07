@@ -384,6 +384,157 @@ const normalizeDashboardStatus = value => {
     return 'pending';
 };
 
+const ACTION_STATE_SEQUENCE = [
+    'queued',
+    'starting',
+    'logged_in',
+    'navigating',
+    'loaded',
+    'liking',
+    'liked',
+    'commenting',
+    'verified',
+    'done',
+];
+const ACTION_STATE_RANKS = new Map(ACTION_STATE_SEQUENCE.map((state, index) => [state, index]));
+const ACTION_STATE_ALIASES = {
+    active: 'starting',
+    working: 'starting',
+    'validating-session': 'starting',
+    login: 'starting',
+    'login-needed': 'starting',
+    verification: 'starting',
+    'manual-verification': 'starting',
+    paused: 'starting',
+    ready: 'logged_in',
+    commented: 'verified',
+    completed: 'done',
+    success: 'done',
+    skipped: 'done',
+    blocked: 'failed',
+    error: 'failed',
+    stalled: 'failed',
+    unverified: 'failed',
+};
+
+const normalizeActionState = value => {
+    const state = String(value || '').trim().toLowerCase();
+    if (!state) {
+        return null;
+    }
+    if (ACTION_STATE_RANKS.has(state) || state === 'failed') {
+        return state;
+    }
+    return ACTION_STATE_ALIASES[state] || null;
+};
+
+const getActionStateRank = state => state === 'failed'
+    ? -1
+    : ACTION_STATE_RANKS.get(state) ?? -1;
+
+const deriveActionState = item => {
+    const status = normalizeDashboardStatus(item?.status || item?.phase);
+    if (status === 'done') {
+        return 'done';
+    }
+    if (status === 'failed') {
+        return 'failed';
+    }
+    if (item?.verification?.visible) {
+        return 'verified';
+    }
+
+    return normalizeActionState(item?.actionState)
+        || normalizeActionState(item?.phase)
+        || normalizeActionState(item?.status)
+        || (status === 'running' ? 'starting' : null);
+};
+
+const withActionState = item => {
+    const actionState = deriveActionState(item);
+    if (!actionState) {
+        return item;
+    }
+
+    return {
+        ...item,
+        actionState,
+        actionStateRank: getActionStateRank(actionState),
+    };
+};
+
+const isVerifiedCompletedDashboardRecord = item => Boolean(item?.verification?.visible)
+    && (
+        deriveActionState(item) === 'done'
+        || normalizeDashboardStatus(item?.status || item?.phase) === 'done'
+    );
+
+const shouldProtectCompletedDashboardRecord = (previous, next, completedAction) => {
+    if (isTrustedCompletedAction(completedAction)) {
+        return true;
+    }
+
+    return isVerifiedCompletedDashboardRecord(previous) && normalizeDashboardStatus(next?.status || next?.phase) !== 'done';
+};
+
+const isSameActionRun = (previous, next) => {
+    const previousStartedAt = previous?.startedAt || null;
+    const nextStartedAt = next?.startedAt || null;
+    if (!previousStartedAt || !nextStartedAt) {
+        return true;
+    }
+
+    return previousStartedAt === nextStartedAt;
+};
+
+const shouldProtectForwardProgress = (previous, next) => {
+    const previousState = deriveActionState(previous);
+    const nextState = deriveActionState(next);
+    if (!previousState || !nextState || previousState === 'failed' || nextState === 'failed' || previousState === 'done') {
+        return false;
+    }
+    if (!isSameActionRun(previous, next)) {
+        return false;
+    }
+
+    return getActionStateRank(previousState) > getActionStateRank(nextState);
+};
+
+const applyActionStateMachine = (previous, next, completedAction = null) => {
+    const normalizedNext = withActionState(next);
+    if (!shouldProtectCompletedDashboardRecord(previous, normalizedNext, completedAction)) {
+        if (shouldProtectForwardProgress(previous, normalizedNext)) {
+            return withActionState({
+                ...normalizedNext,
+                status: previous.status || normalizedNext.status,
+                phase: previous.phase || normalizedNext.phase,
+                actionState: previous.actionState || deriveActionState(previous),
+                actionStateRank: previous.actionStateRank ?? getActionStateRank(deriveActionState(previous)),
+                error: previous.error || normalizedNext.error || null,
+                completedAt: previous.completedAt || normalizedNext.completedAt || null,
+                thumbnailUrl: previous.thumbnailUrl || normalizedNext.thumbnailUrl || null,
+            });
+        }
+
+        return normalizedNext;
+    }
+
+    const completedAt = completedAction?.completedAt || previous?.completedAt || normalizedNext.completedAt || new Date().toISOString();
+    return withActionState({
+        ...normalizedNext,
+        ...previous,
+        status: 'done',
+        phase: 'done',
+        error: null,
+        completedAt,
+        url: completedAction?.finalUrl || previous?.url || normalizedNext.url || completedAction?.originalUrl || null,
+        comment: completedAction?.comment || previous?.comment || normalizedNext.comment || null,
+        thumbnailUrl: completedAction?.thumbnailUrl || previous?.thumbnailUrl || normalizedNext.thumbnailUrl || null,
+        verification: completedAction?.verification || previous?.verification || normalizedNext.verification || null,
+        updatedAt: completedAt,
+    });
+};
+
 const MANUAL_ACTION_PHASES = new Set(['verification', 'manual-verification', 'login-needed', 'paused']);
 const isManualActionPhase = value => MANUAL_ACTION_PHASES.has(String(value || '').trim().toLowerCase());
 const isManualLoginMessage = value => /login|password|username|input\[name="?email"?\]|input\[name="?username"?\]|not logged in|full experience|tablet app|unsupported login prompt/i.test(String(value || ''));
@@ -462,7 +613,7 @@ const getDashboardPostFromPayload = (payload = {}, defaults = {}) => {
         return null;
     }
 
-    return {
+    return withActionState({
         account: accountKey || defaults.account || defaults.accountName || 'default',
         accountKey: accountKey || normalizeAccountName(defaults.accountKey || defaults.account) || 'default',
         contentKey,
@@ -478,7 +629,7 @@ const getDashboardPostFromPayload = (payload = {}, defaults = {}) => {
         completedAt: defaults.completedAt || (status === 'done' ? new Date().toISOString() : null),
         thumbnailUrl: defaults.thumbnailUrl || payload.thumbnailUrl || payload.thumbnail_url || null,
         updatedAt: new Date().toISOString(),
-    };
+    });
 };
 
 const getDashboardPostKey = post => {
@@ -569,13 +720,17 @@ const upsertDashboardPost = post => {
 
     const history = readActionHistory();
     const previous = history.posts[postKey] || {};
-    const merged = {
+    const storedCompletedAction = resolvedPost.contentKey
+        ? history.completed[getHistoryKey(resolvedPost.accountKey, resolvedPost.contentKey)]
+        : null;
+    const completedAction = isTrustedCompletedAction(storedCompletedAction) ? storedCompletedAction : null;
+    const merged = applyActionStateMachine(previous, {
         ...previous,
         ...resolvedPost,
         postKey,
         createdAt: previous.createdAt || post.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-    };
+    }, completedAction);
     const duplicateKeys = [
         merged.rowNumber ? null : rememberedPost?.postKey,
         merged.contentKey ? getHistoryKey(merged.accountKey, merged.contentKey) : null,
@@ -621,20 +776,24 @@ const replaceDashboardPosts = (posts, options = {}) => {
             ? history.completed[getHistoryKey(post.accountKey, post.contentKey)]
             : null;
         const completedAction = isTrustedCompletedAction(storedCompletedAction) ? storedCompletedAction : null;
-        const merged = {
+        let merged = applyActionStateMachine(previous, {
             ...previous,
             ...post,
             postKey,
             createdAt: previous.createdAt || post.createdAt || new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-        };
+        }, completedAction);
 
         if (completedAction) {
-            merged.status = 'done';
-            merged.phase = 'done';
-            merged.completedAt = completedAction.completedAt || merged.completedAt;
-            merged.url = completedAction.finalUrl || merged.url;
-            merged.thumbnailUrl = completedAction.thumbnailUrl || merged.thumbnailUrl;
+            merged = withActionState({
+                ...merged,
+                status: 'done',
+                phase: 'done',
+                completedAt: completedAction.completedAt || merged.completedAt,
+                url: completedAction.finalUrl || merged.url,
+                thumbnailUrl: completedAction.thumbnailUrl || merged.thumbnailUrl,
+                verification: completedAction.verification || merged.verification || null,
+            });
         }
 
         if (shouldStoreDashboardStatus(merged.status) || shouldStoreDashboardStatus(merged.phase)) {
@@ -784,7 +943,7 @@ const findTrustedCompletionForDashboardPost = (history, post) => {
 
 const mergeCompletedActionIntoDashboardPost = (post, completedAction, postKey) => {
     const accountKey = normalizeAccountName(completedAction.account || post?.accountKey || post?.account) || 'default';
-    return {
+    return withActionState({
         ...post,
         postKey,
         account: post?.account || completedAction.account || accountKey,
@@ -800,7 +959,7 @@ const mergeCompletedActionIntoDashboardPost = (post, completedAction, postKey) =
         completedAt: completedAction.completedAt || post?.completedAt || null,
         thumbnailUrl: completedAction.thumbnailUrl || post?.thumbnailUrl || null,
         updatedAt: completedAction.completedAt || post?.updatedAt || null,
-    };
+    });
 };
 
 const isDashboardPostLive = post => {
@@ -835,13 +994,13 @@ const markStaleRunningDashboardPost = post => {
         return post;
     }
     if (isQueuedDashboardPost(post)) {
-        return {
+        return withActionState({
             ...post,
             status: 'running',
             phase: 'queued',
             error: null,
             completedAt: null,
-        };
+        });
     }
     if (isDashboardPostLive(post)) {
         return post;
@@ -853,13 +1012,13 @@ const markStaleRunningDashboardPost = post => {
         return post;
     }
 
-    return {
+    return withActionState({
         ...post,
         status: 'failed',
         phase: 'stalled',
         error: post.error || 'This action was left running, but no live browser session is active now. Rerun this row.',
         completedAt: null,
-    };
+    });
 };
 
 const getDashboardPostsSummary = () => {
@@ -872,25 +1031,25 @@ const getDashboardPostsSummary = () => {
 
         const manualPhase = getManualActionPhase(post);
         if (manualPhase) {
-            return {
+            return withActionState({
                 ...post,
                 postKey,
                 status: 'running',
                 phase: manualPhase,
                 completedAt: null,
-            };
+            });
         }
 
         const isDoneStatus = normalizeDashboardStatus(post.status || post.phase) === 'done';
         if (isDoneStatus) {
-            return {
+            return withActionState({
                 ...post,
                 postKey,
                 status: 'failed',
                 phase: 'unverified',
                 error: 'Previous Done status was not verified by a visible posted comment. Rerun this item.',
                 completedAt: null,
-            };
+            });
         }
 
         return markStaleRunningDashboardPost({ ...post, postKey });
@@ -906,7 +1065,7 @@ const getDashboardPostsSummary = () => {
         }
 
         const accountKey = normalizeAccountName(completedAction.account) || 'default';
-        posts.push({
+        posts.push(withActionState({
             postKey: historyKey,
             account: completedAction.account || accountKey,
             accountKey,
@@ -921,16 +1080,19 @@ const getDashboardPostsSummary = () => {
             thumbnailUrl: completedAction.thumbnailUrl || null,
             createdAt: completedAction.completedAt || null,
             updatedAt: completedAction.completedAt || null,
-        });
+        }));
     });
 
     return mergeDashboardSummaryDuplicates(posts)
+        .map(withActionState)
         .filter(post => ['running', 'done', 'failed'].includes(normalizeDashboardStatus(post.status || post.phase)));
 };
 
 const appendActionEvent = event => {
     const history = readActionHistory();
     const accountKey = normalizeAccountName(event.accountKey || event.account) || 'default';
+    const eventPhase = event.phase || event.action || event.status || null;
+    const eventActionState = deriveActionState({ ...event, phase: eventPhase }) || null;
     const actionEvent = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         time: event.time || new Date().toISOString(),
@@ -938,6 +1100,8 @@ const appendActionEvent = event => {
         accountKey,
         action: event.action || event.phase || 'update',
         status: event.status || event.phase || null,
+        actionState: eventActionState,
+        actionStateRank: getActionStateRank(eventActionState),
         contentKey: event.contentKey || null,
         rowNumber: event.rowNumber || null,
         url: event.url || event.originalUrl || event.finalUrl || null,
@@ -993,6 +1157,11 @@ const recordTaskEvent = (task, action, extra = {}) => {
 
     const phase = extra.phase || action;
     const status = extra.status || normalizeDashboardStatus(phase);
+    const actionStateItem = withActionState({ ...task, status, phase });
+    if (actionStateItem.actionState) {
+        task.actionState = actionStateItem.actionState;
+        task.actionStateRank = actionStateItem.actionStateRank;
+    }
     upsertDashboardPost({
         account: task.accountName || task.accountKey,
         accountKey: task.accountKey,
@@ -1007,6 +1176,7 @@ const recordTaskEvent = (task, action, extra = {}) => {
         startedAt: task.startedAt || null,
         completedAt: extra.completedAt || task.completedAt || null,
         thumbnailUrl: extra.thumbnailUrl || task.thumbnailUrl || null,
+        actionState: task.actionState || null,
     });
 
     const actionEvent = appendActionEvent({
@@ -5968,6 +6138,8 @@ const getActiveSessionsSummary = () => {
                     originalUrl: session.currentTask.originalUrl || null,
                     finalUrl: session.currentTask.finalUrl || null,
                     phase: session.currentTask.phase || null,
+                    actionState: session.currentTask.actionState || deriveActionState(session.currentTask) || null,
+                    actionStateRank: session.currentTask.actionStateRank ?? getActionStateRank(deriveActionState(session.currentTask)),
                     skipped: Boolean(session.currentTask.skip),
                     redirected: Boolean(session.currentTask.redirected),
                     redirectBrowsingDone: Boolean(session.currentTask.redirectBrowsingDone),
@@ -5994,6 +6166,8 @@ const getActionHistorySummary = ({ accountKey, contentKey, limit = 120 } = {}) =
         accountKey: normalizeAccountName(completed.account) || 'default',
         action: 'done',
         status: 'done',
+        actionState: 'done',
+        actionStateRank: getActionStateRank('done'),
         contentKey: completed.contentKey || null,
         url: completed.finalUrl || completed.originalUrl || null,
         message: 'Like and comment completed',
@@ -6040,6 +6214,8 @@ app.get('/health', (_req, res) => {
                 account: activeTask.accountName || activeTask.accountKey,
                 contentKey: activeTask.contentKey || null,
                 phase: activeTask.phase || null,
+                actionState: activeTask.actionState || deriveActionState(activeTask) || null,
+                actionStateRank: activeTask.actionStateRank ?? getActionStateRank(deriveActionState(activeTask)),
                 skipped: Boolean(activeTask.skip),
                 redirected: Boolean(activeTask.redirected),
                 redirectBrowsingDone: Boolean(activeTask.redirectBrowsingDone),

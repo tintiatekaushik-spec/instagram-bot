@@ -3,28 +3,37 @@ const getMonitorHtml = () => `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Instagram Bot Monitor</title>
+  <title>Instagram Monitor</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap');
     :root {
-      color-scheme: dark;
-      --bg: #0b0c0f;
-      --panel: #17191d;
-      --panel-2: #20242a;
-      --text: #e6edf3;
-      --muted: #a5adb6;
-      --line: #333941;
-      --soft: #22262c;
-      --ok: #3fb950;
-      --warn: #d29922;
-      --bad: #f85149;
-      --blue: #58a6ff;
-      --accent: #58a6ff;
-      --accent-soft: rgba(88, 166, 255, .18);
-      font-family: Roboto, Arial, sans-serif;
+      color-scheme: light;
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --surface-3: #eef2f6;
+      --text: #17212b;
+      --muted: #657184;
+      --line: #dce2ea;
+      --line-strong: #c8d1dc;
+      --soft: #eef2f6;
+      --ok: #16843a;
+      --warn: #a86600;
+      --bad: #c7352d;
+      --blue: #2f68c5;
+      --ink: #0f1720;
+      --accent: #2f68c5;
+      --accent-soft: rgba(47, 104, 197, .12);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font-family: Roboto, Arial, sans-serif; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(180deg, #ffffff 0, #f4f6f8 260px, #eef2f6 100%);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    }
     header {
       position: sticky;
       top: 0;
@@ -32,78 +41,152 @@ const getMonitorHtml = () => `<!doctype html>
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 16px;
-      padding: 14px 20px;
-      background: rgba(11, 12, 15, 0.94);
+      gap: 20px;
+      min-height: 74px;
+      padding: 14px 28px;
+      background: rgba(255, 255, 255, 0.88);
       border-bottom: 1px solid var(--line);
-      backdrop-filter: blur(12px);
+      backdrop-filter: blur(18px);
+      box-shadow: 0 1px 0 rgba(15, 23, 32, .04), 0 14px 34px rgba(26, 36, 50, .08);
     }
-    h1 { margin: 0; font-size: 18px; letter-spacing: 0; font-weight: 900; }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: #fff;
+      background: #17212b;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 10px 18px rgba(23, 33, 43, .18);
+      font-size: 13px;
+      font-weight: 900;
+    }
+    h1 { margin: 0; font-size: 16px; letter-spacing: 0; font-weight: 700; }
+    .brand-sub {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .workspace-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 18px;
+      margin: 0 0 16px;
+    }
+    .workspace-title {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+    }
+    .eyebrow {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+    h2 {
+      margin: 0;
+      color: var(--ink);
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    .refresh-note {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
     button { font: inherit; }
     .summary {
       display: flex;
       align-items: center;
-      gap: 8px;
+      justify-content: flex-end;
+      gap: 10px;
       color: var(--muted);
       font-size: 12px;
       white-space: nowrap;
+      min-width: 0;
     }
     .stat {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-      min-height: 26px;
-      padding: 4px 8px;
+      gap: 8px;
+      min-height: 40px;
+      padding: 7px 10px;
       border: 1px solid var(--line);
-      border-radius: 7px;
-      background: rgba(20, 26, 33, .78);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: 0 8px 20px rgba(22, 32, 44, .06);
     }
-    .stat strong { color: var(--text); font-size: 13px; }
+    .stat strong { color: var(--text); font-size: 17px; line-height: 1; }
     .stat.active strong { color: var(--blue); }
     .stat.complete strong { color: var(--ok); }
     .stat.waiting strong { color: var(--muted); }
     .stat.issue strong { color: var(--bad); }
-    main { padding: 18px 18px 22px; }
+    main {
+      width: 100%;
+      margin: 0;
+      padding: 18px 16px 28px;
+    }
     .grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(360px, 1fr));
-      gap: 18px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
       align-items: start;
     }
     .card {
+      position: relative;
       overflow: hidden;
-      border: 1px solid var(--line);
+      border: 2px solid var(--line);
       border-radius: 8px;
-      background: var(--panel);
+      background: var(--surface);
       min-width: 0;
-      box-shadow: 0 10px 26px rgba(0, 0, 0, .22);
-      transition: border-color .18s ease, box-shadow .18s ease;
+      box-shadow: 0 14px 34px rgba(27, 38, 52, .1);
+      transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
     }
-    .card.running { border-color: rgba(88, 166, 255, .62); box-shadow: 0 0 0 1px rgba(88, 166, 255, .12), 0 12px 26px rgba(0, 0, 0, .22); }
-    .card.done { border-color: rgba(63, 185, 80, .46); box-shadow: 0 0 0 1px rgba(63, 185, 80, .12), 0 8px 22px rgba(0, 0, 0, .18); }
-    .card.failed { border-color: rgba(248, 81, 73, .48); }
+    .card:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 18px 42px rgba(27, 38, 52, .14);
+    }
+    .card.running { border-color: rgba(47, 104, 197, .68); }
+    .card.done { border-color: rgba(22, 132, 58, .62); }
+    .card.failed { border-color: rgba(199, 53, 45, .72); }
     .card-head {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      gap: 8px;
+      gap: 12px;
       align-items: center;
-      min-height: 48px;
-      padding: 10px 12px;
+      min-height: 62px;
+      padding: 12px 12px 10px;
       border-bottom: 1px solid var(--line);
-      background: var(--panel-2);
+      background: var(--surface);
     }
     .account-wrap { min-width: 0; display: grid; gap: 2px; }
     .account {
       min-width: 0;
-      font-size: 14px;
+      color: var(--ink);
+      font-size: 15px;
       font-weight: 700;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .card-sub {
+      display: none;
       color: var(--muted);
       font-size: 12px;
+      font-weight: 500;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -115,29 +198,36 @@ const getMonitorHtml = () => `<!doctype html>
       min-width: 0;
     }
     .history-btn {
-      min-height: 26px;
-      padding: 4px 8px;
+      min-height: 30px;
+      padding: 5px 9px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #0f151c;
+      background: var(--surface-2);
       color: var(--text);
       font-size: 12px;
+      font-weight: 600;
       cursor: pointer;
+      box-shadow: 0 1px 0 rgba(255, 255, 255, .8);
     }
-    .history-btn:hover { border-color: var(--blue); color: #cfe5ff; }
+    .history-btn:hover { border-color: var(--blue); color: var(--blue); }
     .queue {
       color: var(--warn);
-      font-size: 11px;
+      font-size: 12px;
+      font-weight: 600;
       white-space: nowrap;
     }
     .pill {
       flex: 0 0 auto;
-      max-width: 108px;
-      padding: 4px 7px;
+      max-width: 118px;
+      min-height: 30px;
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 9px;
       border: 1px solid var(--line);
       border-radius: 999px;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 12px;
+      font-weight: 600;
       line-height: 1;
       text-transform: capitalize;
       overflow: hidden;
@@ -146,16 +236,67 @@ const getMonitorHtml = () => `<!doctype html>
     }
     .pill.running, .pill.ready, .pill.loaded, .pill.liking, .pill.liked, .pill.commenting, .pill.navigating, .pill.login, .pill.starting, .pill.validating-session {
       color: var(--blue);
-      border-color: rgba(88, 166, 255, .45);
+      border-color: rgba(47, 104, 197, .36);
+      background: rgba(47, 104, 197, .08);
     }
-    .pill.queued { color: var(--warn); border-color: rgba(210, 153, 34, .45); }
-    .pill.done, .pill.commented { color: var(--ok); border-color: rgba(63, 185, 80, .45); background: rgba(63, 185, 80, .09); }
-    .pill.failed, .pill.error { color: var(--bad); border-color: rgba(248, 81, 73, .48); }
+    .pill.queued { color: var(--warn); border-color: rgba(168, 102, 0, .34); background: rgba(168, 102, 0, .08); }
+    .pill.done, .pill.commented { color: var(--ok); border-color: rgba(22, 132, 58, .34); background: rgba(22, 132, 58, .08); }
+    .pill.failed, .pill.error { color: var(--bad); border-color: rgba(199, 53, 45, .4); background: rgba(199, 53, 45, .08); }
+    .state-panel {
+      display: grid;
+      gap: 8px;
+      padding: 9px 12px 11px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-2);
+    }
+    .state-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: none;
+    }
+    .state-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .state-time {
+      flex: 0 0 auto;
+      text-transform: none;
+      font-weight: 650;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .state-steps {
+      display: grid;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      gap: 5px;
+    }
+    .state-step {
+      height: 5px;
+      border-radius: 999px;
+      background: #dfe5ec;
+    }
+    .state-step.reached {
+      background: var(--accent);
+    }
+    .card.done .state-step.reached {
+      background: var(--ok);
+    }
+    .card.failed .state-step.reached {
+      background: var(--bad);
+    }
     .preview-wrap {
       position: relative;
       width: 100%;
-      aspect-ratio: 16 / 10;
-      min-height: clamp(300px, 21vw, 430px);
+      aspect-ratio: 16 / 10.2;
+      min-height: clamp(300px, 22vw, 430px);
       background: var(--soft);
       overflow: hidden;
     }
@@ -169,26 +310,25 @@ const getMonitorHtml = () => `<!doctype html>
       height: 100%;
     }
     .placeholder {
-      background: #24282e;
+      background: #e8edf3;
     }
     .card.pending .preview-wrap {
-      background: #252b33;
+      background: #edf1f5;
     }
     .card.pending .placeholder {
-      background: #252b33;
+      background: #edf1f5;
     }
     .card.done .preview-wrap,
     .card.done .placeholder {
-      background: #1f2328;
+      background: #eef3ef;
     }
     .card.running .placeholder {
-      background: #111820;
+      background: #edf4ff;
     }
     .media-thumb {
       display: block;
-      object-fit: cover;
-      background: #111820;
-      transform: scale(1.01);
+      object-fit: contain;
+      background: #edf1f5;
       transition: filter .18s ease, transform .24s ease;
     }
     .card.pending .media-thumb {
@@ -196,20 +336,20 @@ const getMonitorHtml = () => `<!doctype html>
       opacity: .82;
     }
     .card.done .media-thumb {
-      filter: grayscale(1) saturate(.5) brightness(.58);
-      opacity: .78;
+      filter: grayscale(.72) saturate(.56) brightness(.86);
+      opacity: .9;
     }
     .card.running .media-thumb {
-      filter: saturate(.9) brightness(.82);
+      filter: saturate(.92) brightness(.94);
     }
     .card.pending .media-fallback {
       filter: grayscale(.18) saturate(.72) brightness(.82);
     }
     .card.done .media-fallback {
-      filter: grayscale(1) saturate(.5) brightness(.66);
+      filter: grayscale(.72) saturate(.56) brightness(.94);
     }
     .card.failed .media-fallback {
-      filter: grayscale(.28) brightness(.72);
+      filter: grayscale(.28) brightness(.96);
     }
     .media-fallback {
       display: block;
@@ -217,17 +357,17 @@ const getMonitorHtml = () => `<!doctype html>
       color: var(--muted);
       overflow: hidden;
       background:
-        radial-gradient(circle at 18% 18%, var(--accent-soft), transparent 35%),
-        linear-gradient(135deg, #252a30, #15181c 70%);
+        linear-gradient(135deg, var(--accent-soft), transparent 38%),
+        linear-gradient(135deg, #f8fafc, #e9eef4 70%);
     }
     .media-fallback::before {
       content: "";
       position: absolute;
       inset: 0;
       background:
-        linear-gradient(120deg, rgba(255, 255, 255, .08), transparent 24%, transparent 64%, rgba(255, 255, 255, .04)),
-        repeating-linear-gradient(90deg, rgba(255, 255, 255, .035) 0 1px, transparent 1px 46px);
-      opacity: .5;
+        linear-gradient(120deg, rgba(255, 255, 255, .9), transparent 24%, transparent 64%, rgba(255, 255, 255, .5)),
+        repeating-linear-gradient(90deg, rgba(23, 33, 43, .05) 0 1px, transparent 1px 46px);
+      opacity: .72;
       pointer-events: none;
     }
     .fallback-card {
@@ -244,7 +384,7 @@ const getMonitorHtml = () => `<!doctype html>
       border: 1px solid rgba(230, 237, 243, .14);
       border-radius: 999px;
       color: var(--text);
-      background: rgba(11, 12, 15, .38);
+      background: rgba(255, 255, 255, .72);
       font-size: 12px;
       font-weight: 800;
       text-transform: uppercase;
@@ -264,17 +404,17 @@ const getMonitorHtml = () => `<!doctype html>
       width: 76px;
       height: 76px;
       border: 1px solid rgba(230, 237, 243, .16);
-      border-radius: 22px;
-      color: var(--text);
-      background: linear-gradient(145deg, var(--accent-soft), rgba(255, 255, 255, .06));
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 16px 34px rgba(0, 0, 0, .28);
+      border-radius: 18px;
+      color: var(--ink);
+      background: rgba(255, 255, 255, .7);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), 0 16px 34px rgba(27, 38, 52, .12);
       font-size: 20px;
       font-weight: 900;
     }
     .fallback-title {
       max-width: 100%;
       color: var(--text);
-      font-size: clamp(20px, 2.3vw, 30px);
+      font-size: clamp(20px, 2.1vw, 28px);
       font-weight: 900;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -318,7 +458,7 @@ const getMonitorHtml = () => `<!doctype html>
     .tile-shade {
       position: absolute;
       inset: 0;
-      background: linear-gradient(180deg, rgba(11, 12, 15, .04), rgba(11, 12, 15, .08) 55%, rgba(11, 12, 15, .58));
+      background: linear-gradient(180deg, rgba(15, 23, 32, .02), rgba(15, 23, 32, .06) 54%, rgba(15, 23, 32, .52));
       pointer-events: none;
     }
     .tile-info {
@@ -334,6 +474,7 @@ const getMonitorHtml = () => `<!doctype html>
       pointer-events: none;
     }
     .media-name {
+      display: none;
       min-width: 0;
       font-size: 13px;
       font-weight: 800;
@@ -349,10 +490,21 @@ const getMonitorHtml = () => `<!doctype html>
       padding: 3px 6px;
       border: 1px solid rgba(201, 209, 217, .18);
       border-radius: 999px;
-      background: rgba(9, 13, 18, .62);
+      background: rgba(15, 23, 32, .64);
     }
     .done-mark,
-    .failed-mark,
+    .failed-mark {
+      position: absolute;
+      right: 10px;
+      top: 10px;
+      padding: 6px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      z-index: 3;
+    }
     .error-mark {
       position: absolute;
       left: 50%;
@@ -366,15 +518,15 @@ const getMonitorHtml = () => `<!doctype html>
       z-index: 3;
     }
     .done-mark {
-      color: var(--ok);
-      background: rgba(9, 13, 18, .82);
-      border: 1px solid rgba(63, 185, 80, .46);
-      box-shadow: 0 8px 20px rgba(0, 0, 0, .24), 0 0 0 1px rgba(63, 185, 80, .12);
+      color: #fff;
+      background: rgba(22, 132, 58, .94);
+      border: 1px solid rgba(22, 132, 58, .52);
+      box-shadow: 0 10px 22px rgba(22, 132, 58, .2);
     }
     .failed-mark {
-      color: var(--bad);
-      background: rgba(13, 17, 23, .78);
-      border: 1px solid rgba(248, 81, 73, .38);
+      color: #fff;
+      background: rgba(199, 53, 45, .94);
+      border: 1px solid rgba(199, 53, 45, .42);
     }
     .error-mark {
       left: 10px;
@@ -384,7 +536,7 @@ const getMonitorHtml = () => `<!doctype html>
       transform: none;
       max-width: calc(100% - 20px);
       padding: 6px 8px;
-      background: rgba(248, 81, 73, .92);
+      background: rgba(199, 53, 45, .94);
       color: #fff;
       font-size: 12px;
       font-weight: 600;
@@ -400,22 +552,23 @@ const getMonitorHtml = () => `<!doctype html>
       bottom: 8px;
       padding: 4px 7px;
       border-radius: 999px;
-      background: rgba(63, 185, 80, .9);
-      color: #07130a;
+      background: rgba(22, 132, 58, .94);
+      color: #fff;
       font-size: 10px;
       font-weight: 800;
     }
     .empty {
       grid-column: 1 / -1;
-      min-height: 320px;
+      min-height: 340px;
       display: grid;
       place-items: center;
-      border: 1px dashed var(--line);
+      border: 1px dashed var(--line-strong);
       border-radius: 8px;
       color: var(--muted);
-      background: var(--panel);
+      background: rgba(255, 255, 255, .72);
       text-align: center;
       padding: 28px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .7);
     }
     .history-inline {
       position: absolute;
@@ -425,8 +578,9 @@ const getMonitorHtml = () => `<!doctype html>
       grid-template-rows: auto 1fr;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(16, 22, 29, .96);
-      box-shadow: 0 12px 28px rgba(0, 0, 0, .28);
+      background: rgba(255, 255, 255, .96);
+      box-shadow: 0 18px 42px rgba(27, 38, 52, .18);
+      backdrop-filter: blur(16px);
       overflow: hidden;
     }
     .history-inline-head {
@@ -439,13 +593,14 @@ const getMonitorHtml = () => `<!doctype html>
       color: var(--text);
       font-size: 12px;
       font-weight: 800;
+      background: var(--surface-2);
     }
     .close-inline-history {
       width: 24px;
       height: 24px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #0d1117;
+      background: var(--surface);
       color: var(--text);
       line-height: 1;
       cursor: pointer;
@@ -460,10 +615,11 @@ const getMonitorHtml = () => `<!doctype html>
     .history-event {
       border: 1px solid var(--line);
       border-radius: 7px;
-      background: var(--panel);
+      background: var(--surface);
       padding: 7px;
       display: grid;
       gap: 4px;
+      box-shadow: 0 1px 0 rgba(15, 23, 32, .03);
     }
     .history-top {
       display: flex;
@@ -480,33 +636,53 @@ const getMonitorHtml = () => `<!doctype html>
       overflow-wrap: anywhere;
     }
     [hidden] { display: none !important; }
-    @media (max-width: 1250px) {
+    @media (max-width: 1180px) {
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (max-width: 760px) {
       header { align-items: flex-start; flex-direction: column; }
       .summary { white-space: normal; }
+      .workspace-head { align-items: flex-start; flex-direction: column; }
+      .refresh-note { white-space: normal; }
     }
     @media (max-width: 640px) {
-      main { padding: 10px; }
+      header { padding: 12px 14px; }
+      main { padding: 14px; }
       .grid { grid-template-columns: 1fr; }
       .preview-wrap { min-height: 260px; }
       .card-head { grid-template-columns: 1fr; align-items: start; }
       .card-status { justify-content: space-between; }
+      .summary { gap: 8px; }
+      .stat { min-height: 34px; padding: 6px 8px; }
+      .stat strong { font-size: 15px; }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>Instagram Bot Monitor</h1>
+    <div class="brand">
+      <div class="brand-mark">IG</div>
+      <div>
+        <h1>Instagram Monitor</h1>
+        <div class="brand-sub">Accounts</div>
+      </div>
+    </div>
     <div class="summary" id="summary">Connecting...</div>
   </header>
   <main>
+    <section class="workspace-head">
+      <div class="workspace-title">
+        <div class="eyebrow">Dashboard</div>
+        <h2>Actions</h2>
+      </div>
+      <div class="refresh-note" id="refreshNote">Connecting...</div>
+    </section>
     <div class="grid" id="grid"></div>
   </main>
   <script>
     const grid = document.getElementById('grid');
     const summary = document.getElementById('summary');
+    const refreshNote = document.getElementById('refreshNote');
     const cards = new Map();
     const accountStreams = new Map();
     let emptyState = null;
@@ -526,6 +702,56 @@ const getMonitorHtml = () => `<!doctype html>
       if (['running', 'active', 'working', 'queued', 'navigating', 'loaded', 'liking', 'liked', 'commenting', 'ready', 'login', 'login-needed', 'starting', 'validating-session', 'verification', 'manual-verification', 'paused'].includes(status)) return 'running';
       return 'pending';
     };
+    const lifecycleStates = ['queued', 'starting', 'logged_in', 'navigating', 'liked', 'commenting', 'verified', 'done'];
+    const lifecycleRank = state => {
+      const normalized = String(state || '').toLowerCase();
+      const alias = {
+        ready: 'logged_in',
+        login: 'starting',
+        loaded: 'navigating',
+        liking: 'liked',
+        commented: 'verified',
+        completed: 'done',
+        success: 'done',
+        skipped: 'done',
+        error: 'failed',
+        stalled: 'failed',
+        unverified: 'failed'
+      }[normalized] || normalized;
+      if (alias === 'failed') return -1;
+      const index = lifecycleStates.indexOf(alias);
+      return index >= 0 ? index : 1;
+    };
+    const getActionState = (item, status, phase) => {
+      if (status === 'done') return 'done';
+      if (status === 'failed') return 'failed';
+      return item.actionState || phase || status || 'starting';
+    };
+    const getStateTitle = state => {
+      const label = {
+        queued: 'Queued',
+        starting: 'Starting',
+        logged_in: 'Logged in',
+        navigating: 'Navigating',
+        liked: 'Liked',
+        commenting: 'Commenting',
+        verified: 'Verified',
+        done: 'Done',
+        failed: 'Needs attention'
+      }[String(state || '').toLowerCase()];
+      return label || String(state || 'Starting').replace(/[-_]/g, ' ');
+    };
+    const getStateStepsHtml = (item, status, phase) => {
+      const state = getActionState(item, status, phase);
+      const rank = typeof item.actionStateRank === 'number' && item.actionStateRank >= 0
+        ? Math.min(item.actionStateRank, lifecycleStates.length - 1)
+        : lifecycleRank(state);
+      const reachedRank = status === 'failed' && rank < 0 ? Math.max(0, lifecycleRank(phase)) : rank;
+      return lifecycleStates.map((step, index) => {
+        const reached = index <= reachedRank || status === 'done';
+        return '<span class="state-step' + (reached ? ' reached' : '') + '" title="' + escapeText(getStateTitle(step)) + '"></span>';
+      }).join('');
+    };
     const isManualPhase = value => ['login-needed', 'verification', 'manual-verification', 'paused'].includes(String(value || '').toLowerCase());
     const isManualMessage = value => /verification page opened|manual verification|security code|two[- ]factor|confirm it'?s you|suspicious login|verify (your )?(account|identity)|checkpoint|captcha|i'?m not a robot|recaptcha|not logged in|manual instagram login|full experience|tablet app|input\\[name="?email"?\\]/i.test(String(value || ''));
     const formatTime = value => {
@@ -533,6 +759,12 @@ const getMonitorHtml = () => `<!doctype html>
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return String(value);
       return date.toLocaleString();
+    };
+    const formatShortTime = value => {
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     };
     const compact = (value, fallback) => {
       const text = String(value || '').trim();
@@ -581,11 +813,6 @@ const getMonitorHtml = () => `<!doctype html>
       if (parts) return getMediaKindLabel(item) + ' ' + parts.shortcode;
       return item.contentKey || item.url || 'Post not selected';
     };
-    const getVisibleSubtitle = item => {
-      if (item.comment) return compact(item.comment, getMediaKindLabel(item));
-      if (item.scheduledAt) return compact(item.scheduledAt, getMediaKindLabel(item));
-      return getMediaKindLabel(item);
-    };
     const accentPalette = [
       ['#58a6ff', 'rgba(88, 166, 255, .18)'],
       ['#3fb950', 'rgba(63, 185, 80, .18)'],
@@ -606,7 +833,7 @@ const getMonitorHtml = () => `<!doctype html>
     const getFallbackHtml = (item, phase) => {
       const kind = getMediaKindLabel(item);
       const account = item.account || item.accountKey || 'default';
-      const caption = compact(item.comment || item.scheduledAt || phase || 'Waiting', 'Waiting');
+      const caption = compact(getDisplayTarget(item) || item.scheduledAt || phase || 'Waiting', 'Waiting');
       return '<div class="fallback-card">'
         + '<div class="fallback-type">' + escapeText(kind) + '</div>'
         + '<div class="fallback-center">'
@@ -728,6 +955,8 @@ const getMonitorHtml = () => `<!doctype html>
             scheduledAt: null,
             status: normalizeStatus(task.phase || 'running'),
             phase: task.phase || null,
+            actionState: task.actionState || null,
+            actionStateRank: task.actionStateRank ?? null,
             error: task.error || null,
             updatedAt: task.updatedAt || null,
             session
@@ -743,9 +972,13 @@ const getMonitorHtml = () => `<!doctype html>
         + '<div class="account-wrap"><div class="account"></div><div class="card-sub"></div></div>'
         + '<div class="card-status"><button class="history-btn" type="button">History</button><span class="queue"></span><span class="pill"></span></div>'
         + '</div>'
+        + '<div class="state-panel">'
+        + '<div class="state-meta"><span class="state-name"></span><span class="state-time"></span></div>'
+        + '<div class="state-steps"></div>'
+        + '</div>'
         + '<div class="preview-wrap">'
         + '<div class="placeholder"></div>'
-        + '<img class="media-thumb" alt="" loading="lazy" decoding="async" hidden>'
+        + '<img class="media-thumb" alt="" loading="eager" fetchpriority="high" decoding="async" hidden>'
         + '<div class="media-fallback" hidden></div>'
         + '<img class="live-frame live-frame-a" alt="">'
         + '<img class="live-frame live-frame-b" alt="">'
@@ -766,6 +999,9 @@ const getMonitorHtml = () => `<!doctype html>
         historyButton: card.querySelector('.history-btn'),
         queue: card.querySelector('.queue'),
         pill: card.querySelector('.pill'),
+        stateName: card.querySelector('.state-name'),
+        stateTime: card.querySelector('.state-time'),
+        stateSteps: card.querySelector('.state-steps'),
         thumb: card.querySelector('.media-thumb'),
         fallback: card.querySelector('.media-fallback'),
         liveA: card.querySelector('.live-frame-a'),
@@ -954,7 +1190,6 @@ const getMonitorHtml = () => `<!doctype html>
       const queued = item.session ? Number(item.session.queuedOperations || 0) : 0;
       const targetText = getDisplayTarget(item);
       const mediaKind = getMediaKindLabel(item);
-      const visibleSubtitle = getVisibleSubtitle(item);
       const mediaUrl = getInstagramMediaUrl(item);
       const accentPair = getAccentPair(item);
       const storedThumbnailUrl = item.thumbnailUrl || null;
@@ -966,17 +1201,20 @@ const getMonitorHtml = () => `<!doctype html>
       refs.card.style.setProperty('--accent', accentPair[0]);
       refs.card.style.setProperty('--accent-soft', accentPair[1]);
       refs.account.textContent = item.account || item.accountKey || 'default';
-      refs.sub.textContent = visibleSubtitle;
+      refs.sub.textContent = '';
       refs.pill.className = 'pill ' + statusClass(phase);
       refs.pill.textContent = phase;
       refs.queue.textContent = queued ? 'Queue ' + queued : '';
       refs.queue.hidden = !queued;
+      refs.stateName.textContent = getStateTitle(getActionState(item, status, phase));
+      refs.stateTime.textContent = formatShortTime(task.updatedAt || item.updatedAt || item.completedAt || '');
+      refs.stateSteps.innerHTML = getStateStepsHtml(item, status, phase);
       refs.done.hidden = status !== 'done';
       refs.failed.hidden = status !== 'failed';
       const visibleError = status === 'done' ? '' : (task.error || item.error || '');
       refs.error.textContent = visibleError;
       refs.error.hidden = !visibleError;
-      refs.mediaName.textContent = visibleSubtitle;
+      refs.mediaName.textContent = '';
       refs.rowTag.textContent = mediaKind;
       refs.rowTag.hidden = !mediaKind;
       if (useStoredThumbnail) {
@@ -1030,9 +1268,9 @@ const getMonitorHtml = () => `<!doctype html>
       }
       refs.card.title = 'Account: ' + (item.account || item.accountKey || 'default')
         + '\\nStatus: ' + phase
+        + (item.actionState ? '\\nState: ' + item.actionState : '')
         + (item.rowNumber ? '\\nRow: ' + item.rowNumber : '')
         + '\\nTarget: ' + targetText
-        + (item.comment ? '\\nComment: ' + item.comment : '')
         + (item.scheduledAt ? '\\nScheduled: ' + item.scheduledAt : '')
         + (queued ? '\\nQueued operations: ' + queued : '')
         + (task.updatedAt || item.updatedAt ? '\\nUpdated: ' + formatTime(task.updatedAt || item.updatedAt) : '');
@@ -1066,13 +1304,14 @@ const getMonitorHtml = () => `<!doctype html>
           + '<span class="stat complete"><strong>' + (counts.done || 0) + '</strong><span>Complete</span></span>'
           + ((counts.failed || 0) ? '<span class="stat issue"><strong>' + counts.failed + '</strong><span>Issues</span></span>' : '')
         : '<span class="stat waiting"><strong>0</strong><span>Activity</span></span>';
+      refreshNote.textContent = 'Updated ' + formatShortTime(new Date().toISOString());
     };
 
     const showEmpty = () => {
       if (!emptyState) {
         emptyState = document.createElement('div');
         emptyState.className = 'empty';
-        emptyState.textContent = 'No actions running or completed yet.';
+        emptyState.textContent = 'No actions running or completed yet';
         grid.appendChild(emptyState);
       }
     };
@@ -1105,6 +1344,7 @@ const getMonitorHtml = () => `<!doctype html>
         removeMissingCards(seen);
       } catch (error) {
         summary.innerHTML = '<span class="stat issue"><strong>Offline</strong><span>Reconnecting</span></span>';
+        refreshNote.textContent = 'Connection unavailable';
       }
     }
 
