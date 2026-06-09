@@ -5,6 +5,8 @@ node_modules/
 .env.*
 session.json
 sessions/
+x-edge-profile/
+x-manual-chrome-profile/
 
 # Runtime/generated data
 action-history.json

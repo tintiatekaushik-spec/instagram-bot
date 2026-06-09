@@ -2,6 +2,7 @@ const express = require('express');
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { exec } = require('child_process');
 const { AsyncLocalStorage } = require('async_hooks');
 const { getMonitorHtml } = require('./dashboard');
@@ -17,6 +18,7 @@ let currentAccountKey;
 const createBrowserSession = (accountKey = 'default', accountName = accountKey) => ({
     accountKey,
     accountName,
+    platform: inferPlatformFromAccountKey(accountKey),
     browser: null,
     context: null,
     page: null,
@@ -33,7 +35,7 @@ const createBrowserSession = (accountKey = 'default', accountName = accountKey) 
     queuedActionDrainInFlight: false,
 });
 
-const getBrowserSession = (accountKey = 'default', accountName = accountKey) => {
+const getBrowserSession = (accountKey = 'default', accountName = accountKey, platform = null) => {
     const normalizedKey = normalizeAccountName(accountKey) || 'default';
     if (!browserSessions.has(normalizedKey)) {
         browserSessions.set(normalizedKey, createBrowserSession(normalizedKey, accountName || normalizedKey));
@@ -41,6 +43,7 @@ const getBrowserSession = (accountKey = 'default', accountName = accountKey) => 
 
     const session = browserSessions.get(normalizedKey);
     session.accountName = accountName || session.accountName || normalizedKey;
+    session.platform = normalizePlatform(platform) || session.platform || inferPlatformFromAccountKey(normalizedKey);
     return session;
 };
 
@@ -111,6 +114,8 @@ const ACTION_THUMBNAILS_DIR = path.join(__dirname, 'action-thumbnails');
 const RUNTIME_ERROR_LOG_FILE = process.env.RUNTIME_ERROR_LOG_FILE || path.join(__dirname, 'controller-runtime-errors.log');
 const INSTAGRAM_HOME_URL = 'https://www.instagram.com/';
 const INSTAGRAM_LOGIN_URL = 'https://www.instagram.com/accounts/login/';
+const X_HOME_URL = 'https://x.com/';
+const X_LOGIN_URL = 'https://x.com/i/flow/login';
 const PORT = process.env.PORT || 3000;
 const AUTO_OPEN_MONITOR = process.env.AUTO_OPEN_MONITOR !== 'false';
 const HEADLESS = process.env.HEADLESS === 'true';
@@ -126,6 +131,24 @@ const BROWSER_WINDOW_HEIGHT = Number(process.env.BROWSER_WINDOW_HEIGHT) || BROWS
 const MANUAL_BROWSER_WINDOW_WIDTH = Number(process.env.MANUAL_BROWSER_WINDOW_WIDTH) || Math.max(1280, BROWSER_WINDOW_WIDTH + 80);
 const MANUAL_BROWSER_WINDOW_HEIGHT = Number(process.env.MANUAL_BROWSER_WINDOW_HEIGHT) || BROWSER_WINDOW_HEIGHT;
 const HIDE_BROWSER_WINDOWS = process.env.HIDE_BROWSER_WINDOWS !== 'false' && !HEADLESS;
+const DEFAULT_CHROME_USER_DATA_DIR = process.env.CHROME_USER_DATA_DIR
+    || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'User Data');
+const DEFAULT_CHROME_PROFILE_DIRECTORY = process.env.CHROME_PROFILE_DIRECTORY || 'Default';
+const DEFAULT_EDGE_USER_DATA_DIR = process.env.EDGE_USER_DATA_DIR
+    || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Microsoft', 'Edge', 'User Data');
+const DEDICATED_X_EDGE_USER_DATA_DIR = process.env.DEDICATED_X_EDGE_USER_DATA_DIR || path.join(__dirname, 'x-edge-profile');
+const DEFAULT_X_EDGE_USER_DATA_DIR = process.env.X_EDGE_USER_DATA_DIR || DEFAULT_EDGE_USER_DATA_DIR;
+const DEFAULT_EDGE_PROFILE_DIRECTORY = process.env.EDGE_PROFILE_DIRECTORY || 'Default';
+const X_SYSTEM_BROWSER_CHANNEL = String(process.env.X_SYSTEM_BROWSER_CHANNEL || process.env.X_BROWSER_CHANNEL || 'chrome').trim().toLowerCase();
+const X_SYSTEM_BROWSER_NAME = X_SYSTEM_BROWSER_CHANNEL === 'chrome' ? 'Chrome' : 'Edge';
+const DEFAULT_X_SYSTEM_USER_DATA_DIR = X_SYSTEM_BROWSER_CHANNEL === 'chrome' ? DEFAULT_CHROME_USER_DATA_DIR : DEFAULT_X_EDGE_USER_DATA_DIR;
+const DEFAULT_X_SYSTEM_PROFILE_DIRECTORY = process.env.X_PROFILE_DIRECTORY
+    || (X_SYSTEM_BROWSER_CHANNEL === 'chrome' ? DEFAULT_CHROME_PROFILE_DIRECTORY : DEFAULT_EDGE_PROFILE_DIRECTORY);
+const X_USE_SYSTEM_BROWSER_PROFILE = process.env.X_USE_SYSTEM_BROWSER_PROFILE === 'true'
+    || process.env.X_USE_SYSTEM_CHROME_PROFILE === 'true';
+const X_AUTO_LOGIN = process.env.X_AUTO_LOGIN === 'true';
+const X_MANUAL_CHROME_USER_DATA_DIR = process.env.X_MANUAL_CHROME_USER_DATA_DIR || path.join(__dirname, 'x-manual-chrome-profile');
+const X_MANUAL_CHROME_DEBUG_PORT_BASE = Number(process.env.X_MANUAL_CHROME_DEBUG_PORT_BASE) || 9323;
 const AUTO_RESUME_AFTER_MANUAL_VERIFICATION = process.env.AUTO_RESUME_AFTER_MANUAL_VERIFICATION !== 'false';
 const DEFAULT_REDIRECT_BROWSING_MS = 65000;
 const MONITOR_STREAM_QUALITY = Number(process.env.MONITOR_STREAM_QUALITY) || 72;
@@ -196,6 +219,35 @@ const openUrlInDefaultBrowser = url => {
     });
 };
 
+const getChromeExecutablePath = () => [
+    process.env.CHROME_EXECUTABLE_PATH,
+    path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+].filter(Boolean).find(candidate => fs.existsSync(candidate)) || 'chrome';
+
+const getXManualChromeDebugPort = accountKey => {
+    const hash = safeAccountName(accountKey).split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
+    return X_MANUAL_CHROME_DEBUG_PORT_BASE + (hash % 200);
+};
+
+const openXManualLoginChrome = session => {
+    const accountPart = safeAccountName(session.accountKey || session.accountName || 'default');
+    const userDataDir = path.join(X_MANUAL_CHROME_USER_DATA_DIR, accountPart);
+    const port = getXManualChromeDebugPort(session.accountKey);
+    fs.mkdirSync(userDataDir, { recursive: true });
+    const chromePath = getChromeExecutablePath();
+    const command = process.platform === 'win32'
+        ? `start "" "${chromePath}" --remote-debugging-port=${port} --user-data-dir="${userDataDir}" --no-first-run "${X_LOGIN_URL}"`
+        : `"${chromePath}" --remote-debugging-port=${port} --user-data-dir="${userDataDir}" --no-first-run "${X_LOGIN_URL}"`;
+    exec(command, error => {
+        if (error) {
+            console.log(`Could not open dedicated Chrome login: ${error.message}`);
+        }
+    });
+    return { port, userDataDir };
+};
+
 const getPayload = req => req.body?.parameters || req.body || {};
 const isPageOpen = () => {
     const activePage = getActiveBrowserSession().page;
@@ -212,6 +264,30 @@ const getFirstPayloadValue = (payload, names) => {
     return null;
 };
 const normalizeAccountName = value => String(value || '').trim().replace(/^@/, '').toLowerCase();
+const normalizePlatform = value => {
+    const platform = String(value || '').trim().toLowerCase();
+    if (['x', 'twitter'].includes(platform)) {
+        return 'x';
+    }
+    if (['instagram', 'ig'].includes(platform)) {
+        return 'instagram';
+    }
+    return null;
+};
+const inferPlatformFromAccountKey = accountKey => String(accountKey || '').startsWith('x:') ? 'x' : 'instagram';
+const getItemPlatform = item => normalizePlatform(item?.platform)
+    || (String(item?.accountKey || '').startsWith('x:') || String(item?.contentKey || '').startsWith('x:') ? 'x' : 'instagram');
+const stripPlatformAccountKey = accountKey => String(accountKey || '').replace(/^x:/, '');
+const getPlatformAccountKey = (platform, accountName) => {
+    const normalized = normalizeAccountName(accountName);
+    if (!normalized) {
+        return platform === 'x' ? 'x:default' : 'default';
+    }
+    if (platform === 'x') {
+        return normalized.startsWith('x:') ? normalized : `x:${normalized}`;
+    }
+    return normalized.replace(/^instagram:/, '');
+};
 const normalizeCommentValue = value => String(value || '').replace(/\s+/g, ' ').trim();
 const commentValueEquals = (value, expected) => normalizeCommentValue(value) === normalizeCommentValue(expected);
 const safeAccountName = value => normalizeAccountName(value).replace(/[^a-z0-9._-]/g, '_');
@@ -219,6 +295,72 @@ const getAccountPassword = payload => {
     const password = payload.account_password || payload.instagram_password || payload.password;
     return typeof password === 'string' ? password : String(password || '');
 };
+const getXAccountPassword = payload => {
+    const password = payload.x_password || payload.account_password || payload.password;
+    return typeof password === 'string' ? password : String(password || '');
+};
+const getXApiAccessToken = (payload = {}, session = null) => {
+    const accountName = normalizeAccountName(
+        payload.x_username
+        || payload.twitter_username
+        || payload.account_username
+        || payload.username
+        || session?.accountName
+        || stripPlatformAccountKey(session?.accountKey),
+    );
+    const accountEnvSuffix = safeAccountName(accountName).toUpperCase().replace(/[^A-Z0-9]/g, '_');
+    const envToken = accountEnvSuffix ? process.env[`X_API_ACCESS_TOKEN_${accountEnvSuffix}`] : null;
+    const token = payload.x_access_token
+        || payload.x_api_access_token
+        || payload.x_user_access_token
+        || payload.user_access_token
+        || payload.access_token
+        || envToken
+        || process.env.X_API_ACCESS_TOKEN
+        || null;
+    return typeof token === 'string' ? token.trim() : String(token || '').trim();
+};
+const getXApiUserId = (payload = {}, session = null) => {
+    const accountName = normalizeAccountName(
+        payload.x_username
+        || payload.twitter_username
+        || payload.account_username
+        || payload.username
+        || session?.accountName
+        || stripPlatformAccountKey(session?.accountKey),
+    );
+    const accountEnvSuffix = safeAccountName(accountName).toUpperCase().replace(/[^A-Z0-9]/g, '_');
+    const envUserId = accountEnvSuffix ? process.env[`X_API_USER_ID_${accountEnvSuffix}`] : null;
+    const userId = payload.x_user_id
+        || payload.twitter_user_id
+        || payload.user_id
+        || envUserId
+        || process.env.X_API_USER_ID
+        || null;
+    return typeof userId === 'string' ? userId.trim() : String(userId || '').trim();
+};
+const X_USERNAME_INPUT_SELECTORS = [
+    '[role="dialog"] input[name="text"]',
+    '[role="dialog"] input[autocomplete="username"]',
+    '[role="dialog"] input[data-testid="ocfEnterTextTextInput"]',
+    'input[name="text"]',
+    'input[autocomplete="username"]',
+    'input[data-testid="ocfEnterTextTextInput"]',
+    'input[aria-label*="email" i]',
+    'input[placeholder*="email" i]',
+    'input[aria-label*="username" i]',
+    'input[placeholder*="username" i]',
+];
+const X_PASSWORD_INPUT_SELECTORS = [
+    '[role="dialog"] input[name="password"]',
+    '[role="dialog"] input[type="password"]',
+    '[role="dialog"] input[autocomplete="current-password"]',
+    'input[name="password"]',
+    'input[type="password"]',
+    'input[autocomplete="current-password"]',
+    'input[aria-label*="password" i]',
+    'input[placeholder*="password" i]',
+];
 const USERNAME_INPUT_SELECTORS = [
     'input[name="username"]',
     'input[name="email"]',
@@ -319,6 +461,78 @@ const getInstagramUrlForContentKey = contentKey => {
     return null;
 };
 
+const getXUrlFromPayload = payload => getFirstPayloadValue(payload, [
+    'x_url',
+    'xUrl',
+    'tweet_url',
+    'tweetUrl',
+    'status_url',
+    'statusUrl',
+    'x post url',
+    'x_post_url',
+    'xPostUrl',
+    'target_url',
+    'link',
+    'url',
+]) || null;
+
+const getXContentKey = value => {
+    const rawValue = String(value || '').trim();
+    if (!rawValue) {
+        return null;
+    }
+
+    try {
+        const url = new URL(rawValue, X_HOME_URL);
+        const host = url.hostname.replace(/^www\./, '').toLowerCase();
+        const parts = url.pathname.split('/').filter(Boolean);
+        const statusIndex = parts.findIndex(part => ['status', 'statuses'].includes(part.toLowerCase()));
+        const statusId = statusIndex >= 0 ? parts[statusIndex + 1] : (parts[0] === 'i' && parts[1] === 'status' ? parts[2] : null);
+
+        if ((host === 'x.com' || host === 'twitter.com' || host === 'mobile.twitter.com') && statusId) {
+            return `x:${statusId}`;
+        }
+
+        return `x:url:${url.origin}${url.pathname}`.toLowerCase();
+    } catch (_error) {
+        return `x:url:${rawValue.split('?')[0].toLowerCase()}`;
+    }
+};
+
+const getXUrlForContentKey = contentKey => {
+    const match = String(contentKey || '').match(/^x:(?:status:)?([^:]+)$/i);
+    return match ? `${X_HOME_URL}i/status/${encodeURIComponent(match[1])}` : null;
+};
+
+const isXStatusContentKey = contentKey => /^x:[0-9]{1,19}$/i.test(String(contentKey || ''));
+
+const getPayloadPlatform = (payload = {}, fallback = null) => {
+    const explicitPlatform = normalizePlatform(payload.platform || payload.source_platform || payload.sourcePlatform);
+    if (explicitPlatform) {
+        return explicitPlatform;
+    }
+    if (getXUrlFromPayload(payload)) {
+        return 'x';
+    }
+    if (getInstagramUrlFromPayload(payload)) {
+        return 'instagram';
+    }
+    return normalizePlatform(fallback) || null;
+};
+
+const getUrlFromPayloadForPlatform = (payload = {}, platform = null) => {
+    const normalizedPlatform = normalizePlatform(platform) || getPayloadPlatform(payload) || 'instagram';
+    return normalizedPlatform === 'x' ? getXUrlFromPayload(payload) : getInstagramUrlFromPayload(payload);
+};
+
+const getContentKeyForPlatform = (platform, url) => {
+    return platform === 'x' ? getXContentKey(url) : getInstagramContentKey(url);
+};
+
+const getUrlForContentKeyForPlatform = (platform, contentKey) => {
+    return platform === 'x' ? getXUrlForContentKey(contentKey) : getInstagramUrlForContentKey(contentKey);
+};
+
 const normalizeUrlForRedirectCheck = value => {
     const rawValue = String(value || '').trim();
     if (!rawValue) {
@@ -367,6 +581,8 @@ const normalizeDashboardStatus = value => {
         'queued',
         'navigating',
         'loaded',
+        'reposting',
+        'reposted',
         'liking',
         'liked',
         'commenting',
@@ -390,6 +606,8 @@ const ACTION_STATE_SEQUENCE = [
     'logged_in',
     'navigating',
     'loaded',
+    'reposting',
+    'reposted',
     'liking',
     'liked',
     'commenting',
@@ -402,6 +620,8 @@ const ACTION_STATE_ALIASES = {
     working: 'starting',
     'validating-session': 'starting',
     login: 'starting',
+    reposting: 'reposting',
+    reposted: 'reposted',
     'login-needed': 'starting',
     verification: 'starting',
     'manual-verification': 'starting',
@@ -595,12 +815,16 @@ const getDashboardScheduledValue = payload => {
 };
 
 const getDashboardPostFromPayload = (payload = {}, defaults = {}) => {
-    const url = getInstagramUrlFromPayload(payload) || defaults.url || defaults.originalUrl || null;
-    const contentKey = getInstagramContentKey(url) || defaults.contentKey || null;
-    const accountKey = normalizeAccountName(
+    const platform = getPayloadPlatform(payload, defaults.platform || defaults.sourcePlatform || getItemPlatform(defaults)) || 'instagram';
+    const url = getUrlFromPayloadForPlatform(payload, platform) || defaults.url || defaults.originalUrl || null;
+    const contentKey = getContentKeyForPlatform(platform, url) || defaults.contentKey || null;
+    const accountName = normalizeAccountName(
         payload.account_username
+        || payload.x_username
+        || payload.twitter_username
         || payload.username
         || payload.account
+        || stripPlatformAccountKey(defaults.accountKey)
         || defaults.accountKey
         || defaults.account,
     );
@@ -609,13 +833,15 @@ const getDashboardPostFromPayload = (payload = {}, defaults = {}) => {
     const phase = defaults.phase || (status === 'running' && defaults.source === 'sheet' ? 'queued' : status);
     const comment = getFirstPayloadValue(payload, ['comment', 'comment_text', 'text', 'message']);
 
-    if (!accountKey && !contentKey && !url && !rowNumber) {
+    if (!accountName && !contentKey && !url && !rowNumber) {
         return null;
     }
 
+    const accountKey = getPlatformAccountKey(platform, accountName);
     return withActionState({
-        account: accountKey || defaults.account || defaults.accountName || 'default',
-        accountKey: accountKey || normalizeAccountName(defaults.accountKey || defaults.account) || 'default',
+        platform,
+        account: accountName || defaults.account || defaults.accountName || stripPlatformAccountKey(accountKey) || 'default',
+        accountKey,
         contentKey,
         url,
         rowNumber: rowNumber || defaults.rowNumber || null,
@@ -755,6 +981,13 @@ const replaceDashboardPosts = (posts, options = {}) => {
     const history = readActionHistory();
     const nextPosts = {};
     const activePostKey = options.activePostKey || null;
+    const replacePlatform = normalizePlatform(options.platform) || null;
+
+    Object.entries(history.posts || {}).forEach(([postKey, post]) => {
+        if (replacePlatform && getItemPlatform(post) !== replacePlatform) {
+            nextPosts[postKey] = post;
+        }
+    });
 
     posts.forEach(post => {
         const postKey = getDashboardPostKey(post);
@@ -846,10 +1079,38 @@ const getDashboardCurrentRowFromPayload = payload => {
     return null;
 };
 
+const getDashboardRowsPlatform = (payload, rows, currentRow = null) => {
+    const payloadPlatform = getPayloadPlatform(payload);
+    if (payloadPlatform) {
+        return payloadPlatform;
+    }
+
+    const rowPlatform = [currentRow, ...rows]
+        .filter(Boolean)
+        .map(row => getPayloadPlatform(row))
+        .find(Boolean);
+    return rowPlatform || 'instagram';
+};
+
 const normalizeDashboardPassthroughRow = (row, syncedCount) => ({
     ...(row && typeof row === 'object' && !Array.isArray(row) ? row : { value: row }),
     dashboard_synced: true,
     dashboard_synced_count: syncedCount,
+});
+
+const getDashboardRowSheetStatusFields = (row, history) => {
+    const post = getDashboardPostFromPayload(row, { source: 'sheet' });
+    if (!post) {
+        return {};
+    }
+
+    const completedAction = findTrustedCompletionForDashboardPost(history, post);
+    return completedAction ? completedActionSheetFields(completedAction) : {};
+};
+
+const normalizeDashboardSheetSyncRow = (row, syncedCount, history) => ({
+    ...normalizeDashboardPassthroughRow(row, syncedCount),
+    ...getDashboardRowSheetStatusFields(row, history),
 });
 
 const getDashboardSummaryRank = post => {
@@ -918,10 +1179,13 @@ const mergeDashboardSummaryDuplicates = posts => {
 };
 
 const findTrustedCompletionForDashboardPost = (history, post) => {
-    const accountKey = normalizeAccountName(post?.accountKey || post?.account) || 'default';
+    const platform = getItemPlatform(post);
+    const accountKey = post?.accountKey
+        ? normalizeAccountName(post.accountKey)
+        : getPlatformAccountKey(platform, post?.account);
     if (post?.contentKey) {
         const byContent = history.completed[getHistoryKey(accountKey, post.contentKey)] || null;
-        if (isTrustedCompletedAction(byContent)) {
+        if (isTrustedCompletedAction(byContent) && getItemPlatform(byContent) === platform) {
             return byContent;
         }
     }
@@ -934,7 +1198,12 @@ const findTrustedCompletionForDashboardPost = (history, post) => {
             }
 
             const completedAccountKey = normalizeAccountName(completedAction.account) || 'default';
-            return completedAccountKey === accountKey && String(completedAction.rowNumber || '').trim() === rowNumber;
+            const resolvedCompletedAccountKey = completedAction.accountKey
+                ? normalizeAccountName(completedAction.accountKey)
+                : getPlatformAccountKey(getItemPlatform(completedAction), completedAction.account);
+            return getItemPlatform(completedAction) === platform
+                && (resolvedCompletedAccountKey === accountKey || completedAccountKey === accountKey)
+                && String(completedAction.rowNumber || '').trim() === rowNumber;
         }) || null;
     }
 
@@ -942,14 +1211,21 @@ const findTrustedCompletionForDashboardPost = (history, post) => {
 };
 
 const mergeCompletedActionIntoDashboardPost = (post, completedAction, postKey) => {
-    const accountKey = normalizeAccountName(completedAction.account || post?.accountKey || post?.account) || 'default';
+    const platform = getItemPlatform(completedAction) || getItemPlatform(post);
+    const accountKey = completedAction.accountKey
+        ? normalizeAccountName(completedAction.accountKey)
+        : getPlatformAccountKey(platform, completedAction.account || post?.accountKey || post?.account);
     return withActionState({
         ...post,
+        platform,
         postKey,
-        account: post?.account || completedAction.account || accountKey,
+        account: post?.account || completedAction.account || stripPlatformAccountKey(accountKey),
         accountKey,
         contentKey: completedAction.contentKey || post?.contentKey || null,
-        url: completedAction.finalUrl || completedAction.originalUrl || post?.url || getInstagramUrlForContentKey(completedAction.contentKey),
+        url: completedAction.finalUrl
+            || completedAction.originalUrl
+            || post?.url
+            || getUrlForContentKeyForPlatform(platform, completedAction.contentKey),
         rowNumber: completedAction.rowNumber || post?.rowNumber || null,
         comment: completedAction.comment || post?.comment || null,
         status: 'done',
@@ -1021,56 +1297,68 @@ const markStaleRunningDashboardPost = post => {
     });
 };
 
-const getDashboardPostsSummary = () => {
+const getDashboardPostsSummary = ({ platform = null } = {}) => {
+    const requestedPlatform = normalizePlatform(platform);
     const history = readActionHistory();
-    const posts = Object.entries(history.posts).map(([postKey, post]) => {
-        const completedAction = findTrustedCompletionForDashboardPost(history, post);
-        if (completedAction) {
-            return mergeCompletedActionIntoDashboardPost(post, completedAction, postKey);
-        }
+    const posts = Object.entries(history.posts)
+        .filter(([_postKey, post]) => !requestedPlatform || getItemPlatform(post) === requestedPlatform)
+        .map(([postKey, post]) => {
+            const completedAction = findTrustedCompletionForDashboardPost(history, post);
+            if (completedAction) {
+                return mergeCompletedActionIntoDashboardPost(post, completedAction, postKey);
+            }
 
-        const manualPhase = getManualActionPhase(post);
-        if (manualPhase) {
-            return withActionState({
-                ...post,
-                postKey,
-                status: 'running',
-                phase: manualPhase,
-                completedAt: null,
-            });
-        }
+            const manualPhase = getManualActionPhase(post);
+            if (manualPhase) {
+                return withActionState({
+                    ...post,
+                    postKey,
+                    status: 'running',
+                    phase: manualPhase,
+                    completedAt: null,
+                });
+            }
 
-        const isDoneStatus = normalizeDashboardStatus(post.status || post.phase) === 'done';
-        if (isDoneStatus) {
-            return withActionState({
-                ...post,
-                postKey,
-                status: 'failed',
-                phase: 'unverified',
-                error: 'Previous Done status was not verified by a visible posted comment. Rerun this item.',
-                completedAt: null,
-            });
-        }
+            const isDoneStatus = normalizeDashboardStatus(post.status || post.phase) === 'done';
+            if (isDoneStatus) {
+                return withActionState({
+                    ...post,
+                    postKey,
+                    status: 'failed',
+                    phase: 'unverified',
+                    error: 'Previous Done status was not verified by a visible posted comment. Rerun this item.',
+                    completedAt: null,
+                });
+            }
 
-        return markStaleRunningDashboardPost({ ...post, postKey });
-    });
+            return markStaleRunningDashboardPost({ ...post, postKey });
+        });
 
     Object.entries(history.completed).forEach(([historyKey, completedAction]) => {
         if (!isTrustedCompletedAction(completedAction)) {
             return;
         }
-
-        if (posts.some(post => post.accountKey === normalizeAccountName(completedAction.account) && post.contentKey === completedAction.contentKey)) {
+        const completedPlatform = getItemPlatform(completedAction);
+        if (requestedPlatform && completedPlatform !== requestedPlatform) {
             return;
         }
 
-        const accountKey = normalizeAccountName(completedAction.account) || 'default';
+        const accountKey = completedAction.accountKey
+            ? normalizeAccountName(completedAction.accountKey)
+            : getPlatformAccountKey(completedPlatform, completedAction.account);
+        if (posts.some(post => post.accountKey === accountKey && post.contentKey === completedAction.contentKey)) {
+            return;
+        }
+
         posts.push(withActionState({
             postKey: historyKey,
-            account: completedAction.account || accountKey,
+            platform: completedPlatform,
+            account: completedAction.account || stripPlatformAccountKey(accountKey),
             accountKey,
             contentKey: completedAction.contentKey,
-            url: completedAction.finalUrl || completedAction.originalUrl || getInstagramUrlForContentKey(completedAction.contentKey),
+            url: completedAction.finalUrl
+                || completedAction.originalUrl
+                || getUrlForContentKeyForPlatform(completedPlatform, completedAction.contentKey),
             rowNumber: completedAction.rowNumber || null,
             comment: completedAction.comment || null,
             status: 'done',
@@ -1090,12 +1378,16 @@ const getDashboardPostsSummary = () => {
 
 const appendActionEvent = event => {
     const history = readActionHistory();
-    const accountKey = normalizeAccountName(event.accountKey || event.account) || 'default';
+    const platform = getItemPlatform(event);
+    const accountKey = event.accountKey
+        ? normalizeAccountName(event.accountKey)
+        : getPlatformAccountKey(platform, event.account);
     const eventPhase = event.phase || event.action || event.status || null;
     const eventActionState = deriveActionState({ ...event, phase: eventPhase }) || null;
     const actionEvent = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         time: event.time || new Date().toISOString(),
+        platform,
         account: event.account || accountKey,
         accountKey,
         action: event.action || event.phase || 'update',
@@ -1155,6 +1447,11 @@ const recordTaskEvent = (task, action, extra = {}) => {
         return null;
     }
 
+    const platform = getItemPlatform(task);
+    const taskUrl = task.originalUrl
+        || task.finalUrl
+        || getUrlForContentKeyForPlatform(platform, task.contentKey || task.requestedContentKey)
+        || null;
     const phase = extra.phase || action;
     const status = extra.status || normalizeDashboardStatus(phase);
     const actionStateItem = withActionState({ ...task, status, phase });
@@ -1163,11 +1460,12 @@ const recordTaskEvent = (task, action, extra = {}) => {
         task.actionStateRank = actionStateItem.actionStateRank;
     }
     upsertDashboardPost({
+        platform,
         account: task.accountName || task.accountKey,
         accountKey: task.accountKey,
         contentKey: task.contentKey || task.requestedContentKey || null,
         rowNumber: task.rowNumber || null,
-        url: task.originalUrl || task.finalUrl || getInstagramUrlForContentKey(task.contentKey) || null,
+        url: taskUrl,
         comment: task.comment || null,
         status,
         phase,
@@ -1180,13 +1478,14 @@ const recordTaskEvent = (task, action, extra = {}) => {
     });
 
     const actionEvent = appendActionEvent({
+        platform,
         account: task.accountName || task.accountKey,
         accountKey: task.accountKey,
         action,
         status,
         contentKey: task.contentKey || task.requestedContentKey || null,
         rowNumber: task.rowNumber || null,
-        url: task.originalUrl || task.finalUrl || getInstagramUrlForContentKey(task.contentKey) || null,
+        url: taskUrl,
         message: extra.message || null,
         error: extra.error || null,
     });
@@ -1543,13 +1842,19 @@ const getSheetStatusFields = ({ status, rowNumber = null, completedAction = null
         : normalizedStatus === 'failed'
             ? 'failed'
             : 'running';
+    const sheetRun = verifiedDone ? 'no' : 'yes';
+    const sheetErrorMessage = sheetActionStatus === 'failed' ? String(error || 'Action failed') : '';
 
     return {
+        action_status: sheetActionStatus,
+        run: sheetRun,
+        error_message: sheetErrorMessage,
+        completed_verified: verifiedDone,
         sheetShouldUpdate: Boolean(finalRowNumber),
         sheetRowNumber: finalRowNumber ? String(finalRowNumber) : null,
         sheetActionStatus,
-        sheetRun: verifiedDone ? 'no' : 'yes',
-        sheetErrorMessage: sheetActionStatus === 'failed' ? String(error || 'Action failed') : '',
+        sheetRun,
+        sheetErrorMessage,
         sheetCompletedVerified: verifiedDone,
         sheetCanMarkDone: verifiedDone,
         sheetCanMarkFailed: sheetActionStatus === 'failed',
@@ -1557,8 +1862,8 @@ const getSheetStatusFields = ({ status, rowNumber = null, completedAction = null
             shouldUpdate: Boolean(finalRowNumber),
             rowNumber: finalRowNumber ? String(finalRowNumber) : null,
             action_status: sheetActionStatus,
-            run: verifiedDone ? 'no' : 'yes',
-            error_message: sheetActionStatus === 'failed' ? String(error || 'Action failed') : '',
+            run: sheetRun,
+            error_message: sheetErrorMessage,
             completed_verified: verifiedDone,
         },
     };
@@ -1573,6 +1878,12 @@ const completedActionSheetFields = completedAction => getSheetStatusFields({
 const runningSheetFields = rowNumber => getSheetStatusFields({
     status: 'running',
     rowNumber,
+});
+
+const failedSheetFields = (rowNumber, error) => getSheetStatusFields({
+    status: 'failed',
+    rowNumber,
+    error,
 });
 
 const queuedTaskResponse = (action, task, activeTask) => ({
@@ -2007,6 +2318,11 @@ const closeBrowser = async ({ preserveTask = false } = {}) => {
                 console.log(`Browser close failed for ${activeSession.accountName || activeSession.accountKey}: ${error.message}`);
             });
             console.log(`Browser closed for ${activeSession.accountName || activeSession.accountKey}.`);
+        } else if (activeSession.context) {
+            await activeSession.context.close().catch(error => {
+                console.log(`Browser context close failed for ${activeSession.accountName || activeSession.accountKey}: ${error.message}`);
+            });
+            console.log(`Browser context closed for ${activeSession.accountName || activeSession.accountKey}.`);
         }
     } finally {
         activeSession.intentionalBrowserClose = false;
@@ -2138,6 +2454,25 @@ const recordUnexpectedBrowserClose = (session, reason) => {
     }
 
     const message = reason || 'Browser closed before the active action completed.';
+    if (getItemPlatform(task) === 'x' && isManualVerificationTask(task)) {
+        const pausedMessage = task.error || session.manualVerification?.message || message;
+        task.error = pausedMessage;
+        task.updatedAt = new Date().toISOString();
+        session.manualVerification = session.manualVerification || {
+            phase: task.phase || 'manual-verification',
+            message: pausedMessage,
+            blocker: task.verificationBlocker || null,
+            stage: task.verificationStage || null,
+            at: task.updatedAt,
+        };
+        recordTaskEvent(task, 'browser-closed', {
+            status: 'running',
+            error: pausedMessage,
+            message: pausedMessage,
+        });
+        return;
+    }
+
     task.phase = 'error';
     task.error = message;
     task.updatedAt = new Date().toISOString();
@@ -2153,7 +2488,9 @@ const recordUnexpectedBrowserClose = (session, reason) => {
     });
 
     if (task.contentKey || task.requestedContentKey || task.rowNumber || task.originalUrl || task.finalUrl) {
+        const platform = getItemPlatform(task);
         upsertDashboardPost({
+            platform,
             account: task.accountName || task.accountKey || session.accountName || session.accountKey,
             accountKey: task.accountKey || session.accountKey,
             contentKey: task.contentKey || task.requestedContentKey || null,
@@ -2198,22 +2535,71 @@ const installBrowserLifecycleHandlers = session => {
     }
 };
 
-const launchBrowser = async storageState => {
+const launchBrowser = async (storageState, options = {}) => {
     const activeSession = getActiveBrowserSession();
     const launchArgs = [`--window-size=${BROWSER_WINDOW_WIDTH},${BROWSER_WINDOW_HEIGHT}`];
     if (HIDE_BROWSER_WINDOWS) {
         launchArgs.push('--window-position=-32000,-32000');
     }
 
-    activeSession.browser = await chromium.launch({
-        headless: HEADLESS,
-        args: launchArgs,
-    });
+    if (options.systemBrowserProfile || options.systemChromeProfile) {
+        const browserChannel = String(options.browserChannel || X_SYSTEM_BROWSER_CHANNEL).trim().toLowerCase();
+        const browserName = browserChannel === 'chrome' ? 'Chrome' : 'Edge';
+        const defaultUserDataDir = browserChannel === 'chrome' ? DEFAULT_CHROME_USER_DATA_DIR : DEFAULT_X_EDGE_USER_DATA_DIR;
+        const defaultProfileDirectory = browserChannel === 'chrome' ? DEFAULT_CHROME_PROFILE_DIRECTORY : DEFAULT_EDGE_PROFILE_DIRECTORY;
+        const userDataDir = path.resolve(options.userDataDir || options.chromeUserDataDir || defaultUserDataDir);
+        const profileDirectory = String(options.profileDirectory || options.chromeProfileDirectory || defaultProfileDirectory).trim() || defaultProfileDirectory;
+        const canCreateProfile = Boolean(options.allowCreateProfile)
+            || (browserChannel !== 'chrome' && path.resolve(userDataDir) === path.resolve(DEDICATED_X_EDGE_USER_DATA_DIR));
+        if (!fs.existsSync(userDataDir)) {
+            if (!canCreateProfile) {
+                throw new Error(`${browserName} user data directory not found: ${userDataDir}`);
+            }
+            fs.mkdirSync(userDataDir, { recursive: true });
+        }
+        if (!fs.existsSync(path.join(userDataDir, profileDirectory))) {
+            if (!canCreateProfile) {
+                throw new Error(`${browserName} profile "${profileDirectory}" not found inside ${userDataDir}`);
+            }
+            fs.mkdirSync(path.join(userDataDir, profileDirectory), { recursive: true });
+        }
+        activeSession.context = await chromium.launchPersistentContext(userDataDir, {
+            channel: browserChannel,
+            headless: false,
+            viewport: BROWSER_VIEWPORT,
+            args: [
+                `--profile-directory=${profileDirectory}`,
+                `--window-size=${BROWSER_WINDOW_WIDTH},${BROWSER_WINDOW_HEIGHT}`,
+                ...(HIDE_BROWSER_WINDOWS ? ['--window-position=-32000,-32000'] : []),
+            ],
+        }).catch(error => {
+            if (/ProcessSingleton|profile.*in use|user data directory is already in use|cannot create default profile/i.test(error.message || '')) {
+                throw new Error(`${browserName} profile "${profileDirectory}" is already open. Close all ${browserName} windows first, then rerun X.`);
+            }
+            throw error;
+        });
+        activeSession.browser = activeSession.context.browser();
+        activeSession.usesSystemBrowserProfile = true;
+        activeSession.systemBrowserChannel = browserChannel;
+        activeSession.systemBrowserName = browserName;
+        activeSession.systemUserDataDir = userDataDir;
+        activeSession.systemProfileDirectory = profileDirectory;
+    } else {
+        activeSession.browser = await chromium.launch({
+            headless: HEADLESS,
+            args: launchArgs,
+        });
 
-    activeSession.context = await activeSession.browser.newContext({
-        ...(storageState ? { storageState } : {}),
-        viewport: BROWSER_VIEWPORT,
-    });
+        activeSession.context = await activeSession.browser.newContext({
+            ...(storageState ? { storageState } : {}),
+            viewport: BROWSER_VIEWPORT,
+        });
+        activeSession.usesSystemBrowserProfile = false;
+        activeSession.systemBrowserChannel = null;
+        activeSession.systemBrowserName = null;
+        activeSession.systemUserDataDir = null;
+        activeSession.systemProfileDirectory = null;
+    }
     activeSession.page = await activeSession.context.newPage();
     installBrowserLifecycleHandlers(activeSession);
     await hideBrowserWindow();
@@ -2363,16 +2749,28 @@ const isLoggedIn = async () => {
 };
 
 const clickFirstVisibleButton = async labels => {
+    if (!isPageOpen()) {
+        return false;
+    }
+
     for (const label of labels) {
-        const button = page.getByRole('button', { name: label }).first();
-        if (await button.isVisible({ timeout: 1000 }).catch(() => false)) {
-            await button.click().catch(() => null);
-            await wait(1000);
-            return true;
+        const getByRole = page.getByRole;
+        if (typeof getByRole === 'function') {
+            const button = getByRole('button', { name: label }).first();
+            if (await button.isVisible({ timeout: 1000 }).catch(() => false)) {
+                await button.click().catch(() => null);
+                await wait(1000);
+                return true;
+            }
         }
     }
 
-    return page.evaluate(patternSources => {
+    const evaluate = page.evaluate;
+    if (typeof evaluate !== 'function') {
+        return false;
+    }
+
+    return evaluate(patternSources => {
         const isVisible = element => {
             const rect = element.getBoundingClientRect();
             const style = window.getComputedStyle(element);
@@ -2442,6 +2840,14 @@ const dismissInstagramDialogs = async () => {
         await wait(1000);
     }
 };
+
+const firstPageRoleLocator = (role, options) => (
+    typeof page.getByRole === 'function' ? page.getByRole(role, options).first() : null
+);
+
+const firstPageTextLocator = (text, options) => (
+    typeof page.getByText === 'function' ? page.getByText(text, options).first() : null
+);
 
 const closeMessagesPanelIfOpen = async () => {
     const panel = await page.evaluate(() => {
@@ -2974,22 +3380,22 @@ const clickLoginEntryPoint = async () => {
     }
 
     const candidates = [
-        page.getByRole('link', { name: /^log in$/i }).first(),
-        page.getByRole('link', { name: /log in/i }).first(),
-        page.getByRole('button', { name: /^log in$/i }).first(),
-        page.getByRole('button', { name: /log in/i }).first(),
-        page.getByText(/^log in$/i).first(),
-        page.getByText(/log in/i).first(),
+        firstPageRoleLocator('link', { name: /^log in$/i }),
+        firstPageRoleLocator('link', { name: /log in/i }),
+        firstPageRoleLocator('button', { name: /^log in$/i }),
+        firstPageRoleLocator('button', { name: /log in/i }),
+        firstPageTextLocator(/^log in$/i),
+        firstPageTextLocator(/log in/i),
         page.locator('button').filter({ hasText: /^log in$/i }).first(),
         page.locator('div[role="button"]').filter({ hasText: /^log in$/i }).first(),
         page.locator('[role="link"]').filter({ hasText: /log in/i }).first(),
         page.locator('[tabindex]').filter({ hasText: /^log in$/i }).first(),
         page.locator('a').filter({ hasText: /log in or sign up/i }).first(),
         page.locator('a').filter({ hasText: /^log in$/i }).first(),
-        page.getByRole('link', { name: /log in or sign up/i }).first(),
-        page.getByRole('button', { name: /log in or sign up/i }).first(),
-        page.getByRole('link', { name: /^log in$/i }).first(),
-    ];
+        firstPageRoleLocator('link', { name: /log in or sign up/i }),
+        firstPageRoleLocator('button', { name: /log in or sign up/i }),
+        firstPageRoleLocator('link', { name: /^log in$/i }),
+    ].filter(Boolean);
 
     for (const candidate of candidates) {
         if (await isLoginFormVisible()) {
@@ -3123,9 +3529,9 @@ const getVisibleInputDetails = async () => {
 const clickEnabledLoginSubmit = async passwordInput => {
     const submitCandidates = [
         page.locator('button[type="submit"]').first(),
-        page.getByRole('button', { name: /^log in$/i }).first(),
+        firstPageRoleLocator('button', { name: /^log in$/i }),
         page.locator('div[role="button"]').filter({ hasText: /^log in$/i }).first(),
-    ];
+    ].filter(Boolean);
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
         for (const candidate of submitCandidates) {
@@ -5371,20 +5777,23 @@ const clickCommentActionFallback = async () => {
 };
 
 const getTaskTargetUrl = task => {
+    const platform = getItemPlatform(task);
     return task?.originalUrl
         || task?.finalUrl
-        || getInstagramUrlForContentKey(task?.contentKey || task?.requestedContentKey);
+        || getUrlForContentKeyForPlatform(platform, task?.contentKey || task?.requestedContentKey);
 };
 
 const getTaskActionDefaults = (task, overrides = {}) => {
+    const platform = getItemPlatform({ ...task, ...overrides });
     const url = overrides.url || getTaskTargetUrl(task) || null;
     const contentKey = overrides.contentKey
         || task?.contentKey
         || task?.requestedContentKey
-        || getInstagramContentKey(url)
+        || getContentKeyForPlatform(platform, url)
         || null;
 
     return {
+        platform,
         url,
         contentKey,
         rowNumber: overrides.rowNumber || task?.rowNumber || null,
@@ -6069,11 +6478,2084 @@ const waitForManualActionCompletion = async (session, actionTask, source = 'manu
     return null;
 };
 
+const getXActionTargetFromPayload = payload => {
+    const url = getXUrlFromPayload(payload);
+    const contentKey = getXContentKey(url);
+    const rowNumber = getFirstPayloadValue(payload, ['row_number', 'rowNumber', 'row', 'sheet_row', 'sheetRow', '__row_number']);
+    const comment = getFirstPayloadValue(payload, ['comment', 'comment_text', 'text', 'message']);
+
+    return {
+        platform: 'x',
+        url,
+        contentKey,
+        rowNumber: rowNumber ? String(rowNumber).trim() : null,
+        comment: comment ? String(comment).trim() : null,
+    };
+};
+
+const getCompletedXActionForTarget = (session, target) => {
+    if (!target?.contentKey && !target?.rowNumber) {
+        return null;
+    }
+    const exact = getCompletedAction(session.accountKey, target.contentKey);
+    if (exact) {
+        return exact;
+    }
+    const history = readActionHistory();
+    return Object.values(history.completed || {}).find(action => {
+        if (!isTrustedCompletedAction(action) || getItemPlatform(action) !== 'x') {
+            return false;
+        }
+        const actionAccountKey = normalizeAccountName(action.accountKey || getPlatformAccountKey('x', action.account));
+        return actionAccountKey === session.accountKey
+            && target.rowNumber
+            && String(action.rowNumber || '').trim() === String(target.rowNumber).trim();
+    }) || null;
+};
+
+const returnCompletedXActionWithoutBrowser = async (session, target) => {
+    const completed = getCompletedXActionForTarget(session, target);
+    if (!completed) {
+        return null;
+    }
+    if (isPageOpen()) {
+        await closeBrowser({ preserveTask: false }).catch(() => null);
+    }
+    console.log(`Skipping duplicate X action already completed: ${getHistoryKey(session.accountKey, completed.contentKey || target.contentKey)}`);
+    return completed;
+};
+
+const getStoredXResumePayloadForSession = (session, fallbackPayload = {}) => {
+    const history = readActionHistory();
+    const post = Object.values(history.posts || {}).find(item => (
+        getItemPlatform(item) === 'x'
+        && item.accountKey === session.accountKey
+        && normalizeDashboardStatus(item.status || item.phase) === 'running'
+        && item.url
+        && item.comment
+    ));
+    if (!post) {
+        return null;
+    }
+    return {
+        ...fallbackPayload,
+        platform: 'x',
+        x_username: stripPlatformAccountKey(session.accountKey),
+        account_username: stripPlatformAccountKey(session.accountKey),
+        x_url: post.url,
+        row_number: post.rowNumber || null,
+        comment_text: post.comment,
+    };
+};
+
+const getXPostIdFromTarget = target => {
+    const contentMatch = String(target?.contentKey || '').match(/^x:(?:status:)?([0-9]{1,19})$/i);
+    if (contentMatch) {
+        return contentMatch[1];
+    }
+    const urlMatch = String(target?.url || '').match(/\/status(?:es)?\/([0-9]{1,19})/i)
+        || String(target?.url || '').match(/\/i\/status\/([0-9]{1,19})/i);
+    return urlMatch ? urlMatch[1] : null;
+};
+
+const xApiRequest = async ({ method = 'GET', path: apiPath, token, body = null }) => {
+    if (typeof fetch !== 'function') {
+        throw new Error('This Node.js version does not provide fetch; upgrade Node.js or use browser X mode.');
+    }
+    const response = await fetch(`https://api.x.com${apiPath}`, {
+        method,
+        headers: {
+            Authorization: `Bearer ${token}`,
+            ...(body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const responseText = await response.text();
+    let data = null;
+    try {
+        data = responseText ? JSON.parse(responseText) : null;
+    } catch (_error) {
+        data = { raw: responseText };
+    }
+
+    if (!response.ok) {
+        const errorDetails = data?.detail
+            || data?.title
+            || data?.errors?.map(error => error.detail || error.title || JSON.stringify(error)).join('; ')
+            || responseText
+            || response.statusText;
+        throw new Error(`X API ${method} ${apiPath} failed (${response.status}): ${errorDetails}`);
+    }
+    return data || {};
+};
+
+const getXApiUserIdForAction = async ({ payload, session, token }) => {
+    const userId = getXApiUserId(payload, session);
+    if (userId) {
+        return userId;
+    }
+
+    const me = await xApiRequest({
+        method: 'GET',
+        path: '/2/users/me',
+        token,
+    });
+    const resolvedId = String(me?.data?.id || '').trim();
+    if (!resolvedId) {
+        throw new Error('X API token worked, but /2/users/me did not return a user id.');
+    }
+    return resolvedId;
+};
+
+const canUseXApiForPayload = (payload, session) => Boolean(getXApiAccessToken(payload, session));
+
+const performXApiAction = async ({ session, payload, target, task }) => {
+    const token = getXApiAccessToken(payload, session);
+    if (!token) {
+        throw new Error('Missing x_access_token for X API mode.');
+    }
+    const tweetId = getXPostIdFromTarget(target);
+    if (!tweetId) {
+        throw new Error('X API mode needs a normal X status URL with a numeric post id.');
+    }
+
+    currentAccountKey = session.accountKey;
+    const userId = await getXApiUserIdForAction({ payload, session, token });
+
+    task.phase = 'api-reposting';
+    task.updatedAt = new Date().toISOString();
+    recordTaskEvent(task, 'api-reposting', { status: 'running', message: 'Reposting through X API.' });
+    const repostResult = await xApiRequest({
+        method: 'POST',
+        path: `/2/users/${encodeURIComponent(userId)}/retweets`,
+        token,
+        body: { tweet_id: tweetId },
+    });
+    task.repostVerification = {
+        verified: Boolean(repostResult?.data?.retweeted ?? true),
+        method: 'x-api-repost',
+        userId,
+        tweetId,
+        response: repostResult?.data || null,
+        at: new Date().toISOString(),
+    };
+
+    task.phase = 'api-liking';
+    task.updatedAt = new Date().toISOString();
+    recordTaskEvent(task, 'api-liking', { status: 'running', message: 'Liking through X API.' });
+    const likeResult = await xApiRequest({
+        method: 'POST',
+        path: `/2/users/${encodeURIComponent(userId)}/likes`,
+        token,
+        body: { tweet_id: tweetId },
+    });
+    task.likeVerification = {
+        verified: Boolean(likeResult?.data?.liked ?? true),
+        method: 'x-api-like',
+        userId,
+        tweetId,
+        response: likeResult?.data || null,
+        at: new Date().toISOString(),
+    };
+
+    task.phase = 'api-replying';
+    task.updatedAt = new Date().toISOString();
+    recordTaskEvent(task, 'api-replying', { status: 'running', message: 'Replying through X API.' });
+    const replyResult = await xApiRequest({
+        method: 'POST',
+        path: '/2/tweets',
+        token,
+        body: {
+            text: target.comment,
+            reply: {
+                in_reply_to_tweet_id: tweetId,
+            },
+        },
+    });
+    task.commentVerification = {
+        visible: Boolean(replyResult?.data?.id),
+        method: 'x-api-reply',
+        replyId: replyResult?.data?.id || null,
+        tweetId,
+        userId,
+        response: replyResult?.data || null,
+    };
+    task.finalUrl = target.url;
+
+    if (!task.commentVerification.visible) {
+        throw new Error('X API reply did not return a created reply id.');
+    }
+
+    return markXTaskCompleted(task);
+};
+
+const getXSessionForRequestPayload = payload => {
+    const loginIdentifier = String(
+        payload.x_username
+        || payload.twitter_username
+        || payload.account_username
+        || payload.username
+        || payload.account
+        || '',
+    ).trim();
+    const accountName = normalizeAccountName(
+        loginIdentifier
+        || 'default',
+    );
+    const accountKey = getPlatformAccountKey('x', accountName);
+    const session = getBrowserSession(accountKey, accountName || stripPlatformAccountKey(accountKey), 'x');
+    session.xLoginIdentifier = loginIdentifier || accountName || stripPlatformAccountKey(accountKey);
+    session.systemBrowserChannel = payload.browserChannel
+        || payload.browser_channel
+        || payload.x_browser_channel
+        || session.systemBrowserChannel
+        || X_SYSTEM_BROWSER_CHANNEL;
+    session.systemUserDataDir = payload.edgeUserDataDir
+        || payload.edge_user_data_dir
+        || payload.chromeUserDataDir
+        || payload.chrome_user_data_dir
+        || payload.userDataDir
+        || payload.user_data_dir
+        || session.systemUserDataDir
+        || null;
+    session.systemProfileDirectory = payload.edgeProfileDirectory
+        || payload.edge_profile_directory
+        || payload.chromeProfileDirectory
+        || payload.chrome_profile_directory
+        || payload.profileDirectory
+        || payload.profile
+        || session.systemProfileDirectory
+        || null;
+    return session;
+};
+
+const getXSessionFileForAccountKey = accountKey => getSessionFileForAccountKey(getPlatformAccountKey('x', accountKey));
+
+const importXSessionFromBrowserProfile = async ({
+    session,
+    browserChannel = 'chrome',
+    browserName = 'Chrome',
+    userDataDir,
+    profileDirectory,
+}) => {
+    const finalUserDataDir = path.resolve(userDataDir);
+    const finalProfileDirectory = String(profileDirectory || 'Default').trim() || 'Default';
+    if (!fs.existsSync(finalUserDataDir)) {
+        throw new Error(`${browserName} user data directory not found: ${finalUserDataDir}`);
+    }
+    if (!fs.existsSync(path.join(finalUserDataDir, finalProfileDirectory))) {
+        throw new Error(`${browserName} profile "${finalProfileDirectory}" not found inside ${finalUserDataDir}`);
+    }
+
+    let browserContext = null;
+    try {
+        browserContext = await chromium.launchPersistentContext(finalUserDataDir, {
+            channel: browserChannel,
+            headless: false,
+            viewport: BROWSER_VIEWPORT,
+            args: [
+                `--profile-directory=${finalProfileDirectory}`,
+                `--window-size=${MANUAL_BROWSER_WINDOW_WIDTH},${MANUAL_BROWSER_WINDOW_HEIGHT}`,
+            ],
+        });
+        const browserPage = browserContext.pages()[0] || await browserContext.newPage();
+        await browserPage.goto(X_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+        await browserPage.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => null);
+        await wait(5000);
+
+        const loggedIn = await browserPage.locator([
+            '[data-testid="SideNav_AccountSwitcher_Button"]',
+            '[data-testid="AppTabBar_Home_Link"]',
+            'a[href="/home"]',
+            '[data-testid="primaryColumn"] [data-testid="tweet"]',
+        ].join(', ')).first().isVisible({ timeout: 5000 }).catch(() => false);
+        const loginText = await browserPage.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+        if (!loggedIn || /log in|sign up|temporarily limited your login/i.test(loginText)) {
+            throw new Error(`${browserName} profile "${finalProfileDirectory}" is not currently logged into X, or X is still showing a login/limit page.`);
+        }
+
+        const sessionFile = getXSessionFileForAccountKey(session.accountKey);
+        const storageState = await browserContext.storageState();
+        fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+        fs.writeFileSync(sessionFile, JSON.stringify(storageState, null, 2));
+        return { sessionFile, userDataDir: finalUserDataDir, profileDirectory: finalProfileDirectory };
+    } catch (error) {
+        if (/process.*singleton|user data directory is already in use|Failed to create a ProcessSingleton|cannot create default profile directory/i.test(error.message || '')) {
+            throw new Error(`${browserName} profile "${finalProfileDirectory}" is already open. Close all normal ${browserName} windows first, then run the import again.`);
+        }
+        throw error;
+    } finally {
+        if (browserContext) {
+            await browserContext.close().catch(() => null);
+        }
+    }
+};
+
+const importXSessionFromChromeProfile = async ({ session, chromeUserDataDir, chromeProfileDirectory }) => {
+    return importXSessionFromBrowserProfile({
+        session,
+        browserChannel: 'chrome',
+        browserName: 'Chrome',
+        userDataDir: chromeUserDataDir || DEFAULT_CHROME_USER_DATA_DIR,
+        profileDirectory: chromeProfileDirectory || DEFAULT_CHROME_PROFILE_DIRECTORY,
+    });
+};
+
+const importXSessionFromEdgeProfile = async ({ session, edgeUserDataDir, edgeProfileDirectory }) => {
+    return importXSessionFromBrowserProfile({
+        session,
+        browserChannel: 'msedge',
+        browserName: 'Edge',
+        userDataDir: edgeUserDataDir || DEFAULT_EDGE_USER_DATA_DIR,
+        profileDirectory: edgeProfileDirectory || DEFAULT_EDGE_PROFILE_DIRECTORY,
+    });
+};
+
+const isXLoginFormVisible = async () => Boolean(await firstVisibleLocator([
+    'input[name="text"]',
+    'input[name="password"]',
+    'input[autocomplete="username"]',
+    'input[data-testid="ocfEnterTextTextInput"]',
+]));
+
+const getXBlocker = async () => {
+    if (!isPageOpen()) {
+        return null;
+    }
+
+    const url = page.url();
+    if (/\/account\/access|\/account\/begin_password_reset|\/i\/flow\/two-factor|\/i\/flow\/challenge|signup_phone/i.test(url)) {
+        return `X verification page opened: ${url}`;
+    }
+
+    const bodyText = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    const blockerPatterns = [
+        {
+            pattern: /temporarily limited your login|try again later/i,
+            message: 'X has temporarily limited login attempts for this account. Stop retrying for now; keep the visible Edge window open and finish login there when X allows it.',
+        },
+        {
+            pattern: /enter your phone number|send an sms|text message/i,
+            message: 'X is asking for phone/SMS verification.',
+        },
+        {
+            pattern: /verification code|two[- ]factor|authenticate your account|confirm your identity|unusual login|suspicious|captcha|arkose|enter the code/i,
+            message: 'X is asking for verification, security code, or captcha.',
+        },
+    ];
+    const matched = blockerPatterns.find(({ pattern }) => pattern.test(bodyText));
+    return matched?.message || null;
+};
+
+const getXLoginGate = async () => {
+    if (!isPageOpen()) {
+        return null;
+    }
+
+    const url = page.url();
+    if (/\/i\/flow\/login|\/login/i.test(url) && await isXLoginFormVisible()) {
+        return 'X login form is visible.';
+    }
+
+    const bodyText = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    const loginPatterns = [
+        /log in to x/i,
+        /log in to twitter/i,
+        /sign up.*log in/i,
+        /don'?t miss what'?s happening/i,
+        /new to x/i,
+        /create your account/i,
+    ];
+    const matchedPattern = loginPatterns.find(pattern => pattern.test(bodyText));
+    return matchedPattern ? `X is asking this account to log in: ${matchedPattern}` : null;
+};
+
+const throwIfXBlocked = async stage => {
+    const blocker = await getXBlocker();
+    if (!blocker) {
+        return;
+    }
+
+    const task = await markXTaskPaused({
+        phase: 'manual-verification',
+        message: blocker,
+        blocker,
+        stage,
+    });
+    throw createXManualVerificationError({ stage, blocker, task });
+};
+
+const clickXModalActionButton = async () => {
+    if (!isPageOpen()) {
+        return false;
+    }
+
+    return page.evaluate(() => {
+        const isVisible = element => {
+            if (!element) return false;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0
+                && rect.bottom > 0 && rect.right > 0
+                && rect.top < window.innerHeight && rect.left < window.innerWidth
+                && style.display !== 'none' && style.visibility !== 'hidden';
+        };
+        const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')).filter(isVisible);
+        const roots = dialogs.length ? dialogs : [];
+        const wanted = /^(got it|done|ok|okay|continue|not now|maybe later|skip|close|more)$/i;
+        const buttons = roots
+            .flatMap(root => Array.from(root.querySelectorAll('button, [role="button"], a')))
+            .filter(isVisible)
+            .filter(element => !element.disabled && element.getAttribute('aria-disabled') !== 'true')
+            .filter(element => wanted.test(normalize(element.getAttribute('aria-label') || element.textContent)));
+        const target = buttons.sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return (br.width * br.height) - (ar.width * ar.height);
+        })[0];
+        if (!target) return false;
+        target.click();
+        return true;
+    }).catch(() => false);
+};
+
+const dismissXDialogs = async () => {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+        const clicked = await clickXModalActionButton() || await clickFirstVisibleButton([
+            /^not now$/i,
+            /^maybe later$/i,
+            /^skip$/i,
+            /^got it$/i,
+            /^continue$/i,
+            /^ok$/i,
+            /^done$/i,
+            /^confirm$/i,
+            /^accept all cookies$/i,
+            /^refuse non-essential cookies$/i,
+            /^allow all cookies$/i,
+            /^close$/i,
+        ]);
+
+        if (!clicked) {
+            return;
+        }
+        await wait(900);
+    }
+};
+
+const isAnyXLocatorVisible = async (selector, timeout = 2500) => {
+    const locator = page.locator(selector);
+    const firstVisible = await locator.first().isVisible({ timeout }).catch(() => false);
+    if (firstVisible) {
+        return true;
+    }
+
+    const count = await locator.count().catch(() => 0);
+    for (let index = 1; index < Math.min(count, 12); index += 1) {
+        if (await locator.nth(index).isVisible({ timeout: 300 }).catch(() => false)) {
+            return true;
+        }
+    }
+    return false;
+};
+
+const isXLoggedIn = async () => {
+    await wait(1000);
+    await throwIfXBlocked('x session validation');
+    if (await getXLoginGate()) {
+        return false;
+    }
+
+    const loggedInSelectors = [
+        '[data-testid="SideNav_AccountSwitcher_Button"]',
+        '[data-testid="AppTabBar_Home_Link"]',
+        'a[aria-label*="Home" i][href="/home"]',
+        'a[href="/home"]',
+        '[data-testid="primaryColumn"] [data-testid="tweet"]',
+        '[data-testid="tweetTextarea_0"]',
+        '[data-testid^="tweetTextarea_"]',
+        '[aria-label="Post text"]',
+        '[aria-label="Timeline: Your Home Timeline"]',
+        '[aria-label*="Home timeline" i]',
+    ];
+    for (const selector of loggedInSelectors) {
+        if (await isAnyXLocatorVisible(selector)) {
+            return true;
+        }
+    }
+
+    const url = page.url();
+    const bodyText = await page.locator('body').innerText({ timeout: 2500 }).catch(() => '');
+    return /\/home(?:$|[?#])/i.test(url)
+        && /Home Timeline|For you\s+Following|What.?s happening\?|Post Your Home Timeline/i.test(bodyText);
+};
+
+const fillXInput = async (selectors, value, label) => {
+    const input = await firstVisibleLocator(selectors);
+    if (!input) {
+        throw new Error(`Could not find visible X ${label} input.`);
+    }
+    await input.click({ timeout: 5000 }).catch(() => null);
+    await input.fill(String(value), { timeout: 7000 }).catch(async () => {
+        await page.keyboard.press('Control+A').catch(() => null);
+        await page.keyboard.press('Backspace').catch(() => null);
+        await page.keyboard.type(String(value), { delay: 25 });
+    });
+    await wait(400);
+    return input;
+};
+
+const clickXFlowButton = async labels => {
+    const clicked = await clickFirstVisibleButton(labels);
+    if (clicked) {
+        return true;
+    }
+
+    return page.keyboard.press('Enter').then(() => true).catch(() => false);
+};
+
+const getVisibleXInputDetails = async () => page.evaluate(() => {
+    const isVisible = element => {
+        if (!element || !(element instanceof Element)) {
+            return false;
+        }
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0
+            && rect.height > 0
+            && rect.bottom > 0
+            && rect.right > 0
+            && rect.top < window.innerHeight
+            && rect.left < window.innerWidth
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+    };
+    const isFrontmost = element => {
+        const rect = element.getBoundingClientRect();
+        const points = [
+            [rect.left + rect.width / 2, rect.top + rect.height / 2],
+            [rect.left + Math.min(36, rect.width / 3), rect.top + rect.height * 0.65],
+        ];
+        const container = element.closest('label, [role="group"], [role="dialog"], form, div') || element;
+        return points.some(([x, y]) => {
+            const hit = document.elementFromPoint(x, y);
+            return hit && (element === hit || element.contains(hit) || hit.contains(element) || container.contains(hit));
+        });
+    };
+    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    return Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"][role="textbox"], div[role="textbox"]'))
+        .filter(isVisible)
+        .map((element, index) => {
+            const rect = element.getBoundingClientRect();
+            const labelledBy = element.getAttribute('aria-labelledby');
+            const labelledText = labelledBy
+                ? labelledBy.split(/\s+/)
+                    .map(id => document.getElementById(id)?.textContent || '')
+                    .join(' ')
+                : '';
+            return {
+                index,
+                type: normalize(element.getAttribute('type')),
+                name: normalize(element.getAttribute('name')),
+                placeholder: normalize(element.getAttribute('placeholder')),
+                ariaLabel: normalize(element.getAttribute('aria-label')),
+                label: normalize(labelledText || element.closest('label')?.textContent),
+                text: normalize(element.textContent),
+                frontmost: isFrontmost(element),
+                rect: {
+                    left: rect.left,
+                    top: rect.top,
+                    width: rect.width,
+                    height: rect.height,
+                },
+            };
+        });
+});
+
+const fillXInputByDetails = async ({ matcher, value, label }) => {
+    const details = await getVisibleXInputDetails();
+    const matches = details.filter(matcher);
+    const target = matches.find(input => input.frontmost) || matches[matches.length - 1] || null;
+    if (!target) {
+        throw new Error(`Could not find visible X ${label} input. Visible inputs: ${JSON.stringify(details)}`);
+    }
+    console.log(`X ${label} input target: frontmost=${Boolean(target.frontmost)} rect=${Math.round(target.rect.left)},${Math.round(target.rect.top)},${Math.round(target.rect.width)}x${Math.round(target.rect.height)} matches=${matches.length}`);
+
+    await page.mouse.click(target.rect.left + target.rect.width / 2, target.rect.top + target.rect.height / 2);
+    await wait(250);
+    await page.keyboard.press('Control+A').catch(() => null);
+    await page.keyboard.press('Backspace').catch(() => null);
+    await page.keyboard.type(String(value), { delay: 25 });
+    const currentValue = await setFocusedXFieldValue(value);
+    await wait(500);
+    const snapshot = await getFocusedTextSnapshot();
+    const expected = normalizeCommentValue(value);
+    const actual = normalizeCommentValue(`${currentValue}\n${snapshot}`);
+    if (!actual.includes(expected)) {
+        throw new Error(`Could not type the full X ${label} value into the visible input.`);
+    }
+    return {
+        ...target.rect,
+        right: target.rect.left + target.rect.width,
+        bottom: target.rect.top + target.rect.height,
+    };
+};
+
+const getVisibleTextRect = async patternSource => page.evaluate(source => {
+    const pattern = new RegExp(source, 'i');
+    const isVisible = element => {
+        if (!element || !(element instanceof Element)) {
+            return false;
+        }
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0
+            && rect.height > 0
+            && rect.bottom > 0
+            && rect.right > 0
+            && rect.top < window.innerHeight
+            && rect.left < window.innerWidth
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+    };
+    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const rectToObject = rect => ({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+    });
+    const candidates = Array.from(document.querySelectorAll('input, textarea, label, span, div'))
+        .filter(isVisible)
+        .map(element => {
+            const text = normalize([
+                element.getAttribute('placeholder'),
+                element.getAttribute('aria-label'),
+                element.textContent,
+            ].filter(Boolean).join(' '));
+            const rect = element.getBoundingClientRect();
+            const container = element.closest('label, [role="group"], [role="dialog"], form, div') || element;
+            const containerRect = container.getBoundingClientRect();
+            return {
+                text,
+                rect: rectToObject(rect),
+                containerRect: rectToObject(containerRect),
+                score: (rect.width * rect.height) + (pattern.test(text) ? 100000 : 0),
+            };
+        })
+        .filter(candidate => pattern.test(candidate.text))
+        .sort((a, b) => b.score - a.score);
+
+    return candidates[0] || null;
+}, patternSource).catch(() => null);
+
+const getXFieldRectByText = async patternSource => page.evaluate(source => {
+    const pattern = new RegExp(source, 'i');
+    const isVisible = element => {
+        if (!element || !(element instanceof Element)) {
+            return false;
+        }
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0
+            && rect.height > 0
+            && rect.bottom > 0
+            && rect.right > 0
+            && rect.top < window.innerHeight
+            && rect.left < window.innerWidth
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+    };
+    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const rectToObject = rect => ({
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+    });
+    const getText = element => normalize([
+        element.getAttribute('placeholder'),
+        element.getAttribute('aria-label'),
+        element.textContent,
+    ].filter(Boolean).join(' '));
+    const isFrontmost = (element, rect) => {
+        const points = [
+            [rect.left + rect.width / 2, rect.top + rect.height / 2],
+            [rect.left + Math.min(42, rect.width / 3), rect.top + rect.height * 0.65],
+        ];
+        const container = element.closest('label, [role="group"], [role="dialog"], form, div') || element;
+        return points.some(([x, y]) => {
+            const hit = document.elementFromPoint(x, y);
+            return hit && (element === hit || element.contains(hit) || hit.contains(element) || container.contains(hit));
+        });
+    };
+    const getFieldTarget = element => {
+        let current = element;
+        for (let depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+            const rect = current.getBoundingClientRect();
+            if (
+                rect.width >= 220
+                && rect.width <= 620
+                && rect.height >= 42
+                && rect.height <= 110
+                && rect.top >= 0
+                && rect.bottom <= window.innerHeight
+            ) {
+                return { element: current, rect: rectToObject(rect) };
+            }
+        }
+        return { element, rect: rectToObject(element.getBoundingClientRect()) };
+    };
+    const candidates = Array.from(document.querySelectorAll('input, textarea, label, span, div'))
+        .filter(isVisible)
+        .map(element => {
+            const text = getText(element);
+            const elementRect = element.getBoundingClientRect();
+            const fieldTarget = getFieldTarget(element);
+            const fieldRect = fieldTarget.rect;
+            const fieldLike = fieldRect.width >= 220 && fieldRect.height >= 42 && fieldRect.height <= 110;
+            const exact = pattern.test(text);
+            const frontmost = isFrontmost(fieldTarget.element, fieldRect);
+            return {
+                text,
+                rect: fieldRect,
+                fieldLike,
+                frontmost,
+                score: (exact ? 100000 : 0)
+                    + (fieldLike ? 25000 : 0)
+                    + (frontmost ? 50000 : 0)
+                    - Math.abs(fieldRect.height - 58) * 180
+                    - Math.max(0, fieldRect.width - 520) * 20
+                    - (elementRect.width * elementRect.height > 120000 ? 90000 : 0),
+            };
+        })
+        .filter(candidate => (
+            candidate.frontmost
+            && pattern.test(candidate.text)
+            && (candidate.fieldLike || candidate.rect.height <= 130)
+        ))
+        .sort((a, b) => b.score - a.score);
+
+    return candidates[0]?.rect || null;
+}, patternSource).catch(() => null);
+
+const getFocusedTextSnapshot = async () => page.evaluate(() => {
+    const active = document.activeElement;
+    const bodyText = String(document.body?.innerText || '').trim();
+    if (!active) {
+        return bodyText;
+    }
+    return `${String(active.value ?? active.textContent ?? '').trim()}\n${bodyText}`;
+}).catch(() => '');
+
+const setFocusedXFieldValue = async value => page.evaluate(rawValue => {
+    const value = String(rawValue ?? '');
+    const active = document.activeElement;
+    if (!active) {
+        return '';
+    }
+
+    const dispatch = element => {
+        element.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            cancelable: true,
+            data: value,
+            inputType: 'insertText',
+        }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    const setInputValue = (element, nextValue) => {
+        const proto = Object.getPrototypeOf(element);
+        const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')
+            || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+            || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+        if (descriptor?.set) {
+            descriptor.set.call(element, nextValue);
+        } else {
+            element.value = nextValue;
+        }
+        dispatch(element);
+    };
+
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+        active.focus();
+        setInputValue(active, '');
+        setInputValue(active, value);
+        return active.value;
+    }
+
+    if (active.isContentEditable || active.getAttribute('contenteditable') === 'true') {
+        active.focus();
+        active.textContent = '';
+        dispatch(active);
+        document.execCommand?.('insertText', false, value);
+        if (String(active.textContent || '').trim() !== value) {
+            active.textContent = value;
+        }
+        dispatch(active);
+        return active.textContent || '';
+    }
+
+    const nested = active.querySelector?.('input, textarea, [contenteditable="true"]');
+    if (nested instanceof HTMLInputElement || nested instanceof HTMLTextAreaElement) {
+        nested.focus();
+        setInputValue(nested, '');
+        setInputValue(nested, value);
+        return nested.value;
+    }
+    if (nested) {
+        nested.focus();
+        nested.textContent = value;
+        dispatch(nested);
+        return nested.textContent || '';
+    }
+
+    return String(active.textContent || active.value || '');
+}, value).catch(() => '');
+
+const typeIntoXVisibleTextField = async ({ pattern, value, label }) => {
+    const rect = await getXFieldRectByText(pattern.source);
+    if (!rect) {
+        throw new Error(`Could not find visible X ${label} text field.`);
+    }
+
+    const clickPoints = [
+        { x: rect.left + Math.min(42, rect.width / 3), y: rect.top + rect.height * 0.62 },
+        { x: rect.left + rect.width / 2, y: rect.top + rect.height * 0.62 },
+        { x: rect.left + Math.min(42, rect.width / 3), y: rect.top + rect.height / 2 },
+    ];
+    let typed = false;
+    const expected = normalizeCommentValue(value);
+    for (const point of clickPoints) {
+        await page.mouse.click(point.x, point.y);
+        await wait(250);
+        await page.keyboard.press('Control+A').catch(() => null);
+        await page.keyboard.press('Backspace').catch(() => null);
+        await page.keyboard.type(String(value), { delay: 35 }).catch(async () => {
+            await page.keyboard.insertText(String(value));
+        });
+        await wait(500);
+        let snapshot = await getFocusedTextSnapshot();
+        let actual = normalizeCommentValue(snapshot);
+        if (actual.includes(expected)) {
+            typed = true;
+            break;
+        }
+        await page.keyboard.press('Control+A').catch(() => null);
+        await page.keyboard.press('Backspace').catch(() => null);
+        const currentValue = await setFocusedXFieldValue(value);
+        await wait(500);
+        snapshot = await getFocusedTextSnapshot();
+        actual = normalizeCommentValue(`${currentValue}\n${snapshot}`);
+        if (actual.includes(expected)) {
+            typed = true;
+            break;
+        }
+    }
+
+    if (!typed) {
+        throw new Error(`Could not type into visible X ${label} text field.`);
+    }
+
+    await wait(700);
+    return rect;
+};
+
+const clickXManualButtonBelow = async ({ fieldRect, labels, label }) => {
+    const clicked = await page.waitForFunction(({ fieldRect: rawFieldRect, labelSources }) => {
+        const patterns = labelSources.map(source => new RegExp(source, 'i'));
+        const isVisible = element => {
+            if (!element || !(element instanceof Element)) {
+                return false;
+            }
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.right > 0
+                && rect.top < window.innerHeight
+                && rect.left < window.innerWidth
+                && style.display !== 'none'
+                && style.visibility !== 'hidden';
+        };
+        const isFrontmost = element => {
+            const rect = element.getBoundingClientRect();
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+            const hit = document.elementFromPoint(x, y);
+            return hit && (element === hit || element.contains(hit) || hit.contains(element));
+        };
+        const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
+            .filter(isVisible)
+            .filter(isFrontmost)
+            .map(element => {
+                const rect = element.getBoundingClientRect();
+                const text = normalize(element.getAttribute('aria-label') || element.textContent);
+                const centerX = rect.left + rect.width / 2;
+                const centerY = rect.top + rect.height / 2;
+                const belowField = centerY > rawFieldRect.bottom + 8;
+                const horizontallyAligned = centerX >= rawFieldRect.left - 30 && centerX <= rawFieldRect.right + 30;
+                const nearField = centerY <= rawFieldRect.bottom + 460;
+                const style = window.getComputedStyle(element);
+                const greyDisabled = /rgb\(\s*(204|207|239)\s*,\s*(214|217|243)\s*,\s*(221|222|244)\s*\)/i.test(style.backgroundColor || '');
+                const disabled = element.disabled
+                    || element.hasAttribute('disabled')
+                    || element.getAttribute('aria-disabled') === 'true'
+                    || /disabled/i.test(element.getAttribute('class') || '')
+                    || Number(style.opacity || 1) < 0.65
+                    || greyDisabled;
+                return {
+                    element,
+                    text,
+                    centerY,
+                    area: rect.width * rect.height,
+                    belowField,
+                    horizontallyAligned,
+                    nearField,
+                    disabled,
+                };
+            })
+            .filter(candidate => (
+                !candidate.disabled
+                && candidate.belowField
+                && candidate.horizontallyAligned
+                && candidate.nearField
+                && candidate.area >= 900
+                && patterns.some(pattern => pattern.test(candidate.text))
+            ))
+            .sort((a, b) => a.centerY - b.centerY || b.area - a.area);
+
+        const target = candidates[0]?.element?.closest('button, [role="button"]') || candidates[0]?.element;
+        if (!target) {
+            return false;
+        }
+        return true;
+    }, {
+        fieldRect,
+        labelSources: labels.map(pattern => pattern.source),
+    }, { timeout: 8000, polling: 250 }).then(() => true).catch(() => false);
+
+    if (!clicked) {
+        throw new Error(`The X ${label} button below the manual field did not become enabled.`);
+    }
+    const clickResult = await page.evaluate(({ fieldRect: rawFieldRect, labelSources }) => {
+        const patterns = labelSources.map(source => new RegExp(source, 'i'));
+        const isVisible = element => {
+            if (!element || !(element instanceof Element)) {
+                return false;
+            }
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.right > 0
+                && rect.top < window.innerHeight
+                && rect.left < window.innerWidth
+                && style.display !== 'none'
+                && style.visibility !== 'hidden';
+        };
+        const isFrontmost = element => {
+            const rect = element.getBoundingClientRect();
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+            const hit = document.elementFromPoint(x, y);
+            return hit && (element === hit || element.contains(hit) || hit.contains(element));
+        };
+        const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
+            .filter(isVisible)
+            .filter(isFrontmost)
+            .map(element => {
+                const rect = element.getBoundingClientRect();
+                const text = normalize(element.getAttribute('aria-label') || element.textContent);
+                const centerX = rect.left + rect.width / 2;
+                const centerY = rect.top + rect.height / 2;
+                const style = window.getComputedStyle(element);
+                const greyDisabled = /rgb\(\s*(204|207|239)\s*,\s*(214|217|243)\s*,\s*(221|222|244)\s*\)/i.test(style.backgroundColor || '');
+                const disabled = element.disabled
+                    || element.hasAttribute('disabled')
+                    || element.getAttribute('aria-disabled') === 'true'
+                    || /disabled/i.test(element.getAttribute('class') || '')
+                    || Number(style.opacity || 1) < 0.65
+                    || greyDisabled;
+                return { element, text, centerX, centerY, area: rect.width * rect.height, disabled };
+            })
+            .filter(candidate => (
+                !candidate.disabled
+                && candidate.centerY > rawFieldRect.bottom + 8
+                && candidate.centerY <= rawFieldRect.bottom + 460
+                && candidate.centerX >= rawFieldRect.left - 30
+                && candidate.centerX <= rawFieldRect.right + 30
+                && candidate.area >= 900
+                && patterns.some(pattern => pattern.test(candidate.text))
+            ))
+            .sort((a, b) => a.centerY - b.centerY || b.area - a.area);
+        const target = candidates[0]?.element?.closest('button, [role="button"]') || candidates[0]?.element;
+        if (!target) {
+            return false;
+        }
+        target.click();
+        return true;
+    }, {
+        fieldRect,
+        labelSources: labels.map(pattern => pattern.source),
+    }).catch(() => false);
+    if (!clickResult) {
+        throw new Error(`Could not click the enabled X ${label} button below the manual field.`);
+    }
+    await wait(1600);
+};
+
+const fillXInputWithFallback = async ({ matcher, pattern, value, label }) => {
+    try {
+        return await fillXInputByDetails({ matcher, value, label });
+    } catch (error) {
+        console.log(`X ${label} DOM fill fallback needed: ${error.message}`);
+        return await typeIntoXVisibleTextField({ pattern, value, label });
+    }
+};
+
+const fillXLoginInputByLocator = async ({ selectors, value, label }) => {
+    const input = await firstVisibleLocator(selectors);
+    if (!input) {
+        throw new Error(`Could not find visible X ${label} locator.`);
+    }
+
+    await input.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => null);
+    await input.click({ timeout: 8000 });
+    await wait(250);
+    await input.fill('', { timeout: 5000 }).catch(async () => {
+        await page.keyboard.press('Control+A').catch(() => null);
+        await page.keyboard.press('Backspace').catch(() => null);
+    });
+    await input.fill(String(value), { timeout: 8000 }).catch(async () => {
+        await page.keyboard.type(String(value), { delay: 30 }).catch(async () => {
+            await page.keyboard.insertText(String(value));
+        });
+    });
+    await wait(650);
+
+    const expected = normalizeCommentValue(value);
+    const actual = normalizeCommentValue(await input.inputValue({ timeout: 1500 }).catch(() => getFocusedTextSnapshot()));
+    if (!actual.includes(expected)) {
+        await page.keyboard.press('Control+A').catch(() => null);
+        await page.keyboard.press('Backspace').catch(() => null);
+        await page.keyboard.type(String(value), { delay: 30 }).catch(async () => {
+            await page.keyboard.insertText(String(value));
+        });
+        await wait(650);
+        const retryActual = normalizeCommentValue(await input.inputValue({ timeout: 1500 }).catch(() => getFocusedTextSnapshot()));
+        if (!retryActual.includes(expected)) {
+            throw new Error(`Could not type the full X ${label} value with locator.`);
+        }
+    }
+
+    const box = await input.boundingBox({ timeout: 5000 }).catch(() => null);
+    if (!box) {
+        throw new Error(`Could not read the X ${label} field position.`);
+    }
+    return {
+        left: box.x,
+        top: box.y,
+        right: box.x + box.width,
+        bottom: box.y + box.height,
+        width: box.width,
+        height: box.height,
+    };
+};
+
+const isXPhoneVerificationScreen = async () => {
+    if (!isPageOpen()) {
+        return false;
+    }
+    const url = page.url();
+    if (/signup_phone/i.test(url)) {
+        return true;
+    }
+    const bodyText = await page.locator('body').innerText({ timeout: 1500 }).catch(() => '');
+    return /enter your phone number|send an sms|text message|phone number/i.test(bodyText);
+};
+
+const hasXPasswordField = async () => {
+    if (await isXPhoneVerificationScreen()) {
+        return false;
+    }
+
+    const bodyText = await page.locator('body').innerText({ timeout: 1500 }).catch(() => '');
+    if (!/\bpassword\b/i.test(bodyText) || /enter your phone number|send an sms|text message/i.test(bodyText)) {
+        return false;
+    }
+
+    if (await firstVisibleLocator(X_PASSWORD_INPUT_SELECTORS)) {
+        return true;
+    }
+
+    const details = await getVisibleXInputDetails().catch(() => []);
+    if (details.some(input => (
+        input.frontmost
+        && (
+            input.type === 'password'
+            || input.name === 'password'
+            || input.placeholder === 'password'
+            || input.ariaLabel === 'password'
+        )
+    ))) {
+        return true;
+    }
+
+    return Boolean(await getXFieldRectByText('^password$'));
+};
+
+const waitForXPasswordField = async (timeoutMs = 10000) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        if (await hasXPasswordField()) {
+            return true;
+        }
+        await wait(500);
+    }
+    return false;
+};
+
+const typeXCoordinateLoginField = async ({ value, label, fieldRatios, buttonRatios, successCheck = null }) => {
+    const size = page.viewportSize() || BROWSER_VIEWPORT;
+    const x = Math.round(size.width / 2);
+    const expected = normalizeCommentValue(value);
+    let typed = false;
+
+    for (const ratio of fieldRatios) {
+        const y = Math.round(size.height * ratio);
+        await page.mouse.click(x, y);
+        await wait(250);
+        await page.keyboard.press('Control+A').catch(() => null);
+        await page.keyboard.press('Backspace').catch(() => null);
+        await page.keyboard.type(String(value), { delay: 35 }).catch(async () => {
+            await page.keyboard.insertText(String(value));
+        });
+        await wait(650);
+        let snapshot = await getFocusedTextSnapshot();
+        if (normalizeCommentValue(snapshot).includes(expected)) {
+            typed = true;
+            break;
+        }
+
+        const currentValue = await setFocusedXFieldValue(value);
+        await wait(500);
+        snapshot = await getFocusedTextSnapshot();
+        if (normalizeCommentValue(`${currentValue}\n${snapshot}`).includes(expected)) {
+            typed = true;
+            break;
+        }
+    }
+
+    if (!typed) {
+        throw new Error(`Could not type the full X ${label} value using coordinate fallback.`);
+    }
+
+    await wait(1200);
+    for (const ratio of buttonRatios) {
+        await page.mouse.click(x, Math.round(size.height * ratio));
+        await wait(1500);
+        if (successCheck && await successCheck()) {
+            return;
+        }
+    }
+    await page.keyboard.press('Enter').catch(() => null);
+    await wait(1500);
+    if (successCheck) {
+        await successCheck();
+    }
+};
+
+const fillXUsernameStep = async accountName => {
+    try {
+        const fieldRect = await fillXLoginInputByLocator({
+            selectors: X_USERNAME_INPUT_SELECTORS,
+            value: accountName,
+            label: 'email or username',
+        });
+        await clickXManualButtonBelow({ fieldRect, labels: [/^continue$/i, /^next$/i], label: 'username continue' });
+        await wait(1800);
+        return;
+    } catch (error) {
+        console.log(`X username locator fill fallback needed: ${error.message}`);
+    }
+
+    try {
+        const fieldRect = await fillXInputWithFallback({
+            value: accountName,
+            label: 'email or username',
+            pattern: /email or username|phone, email|username/i,
+            matcher: input => (
+                input.name === 'text'
+                || input.placeholder.includes('email or username')
+                || input.ariaLabel.includes('email or username')
+                || input.label.includes('email or username')
+                || input.placeholder.includes('phone, email')
+                || input.label.includes('username')
+            ) && input.type !== 'password',
+        });
+        await clickXManualButtonBelow({ fieldRect, labels: [/^continue$/i, /^next$/i], label: 'username continue' });
+    } catch (error) {
+        console.log(`X username coordinate fallback needed: ${error.message}`);
+        await typeXCoordinateLoginField({
+            value: accountName,
+            label: 'email or username',
+            fieldRatios: [0.62, 0.64, 0.6],
+            buttonRatios: [0.76, 0.77, 0.78, 0.75],
+            successCheck: hasXPasswordField,
+        });
+    }
+    await wait(1800);
+};
+
+const fillXPasswordStep = async password => {
+    try {
+        const fieldRect = await fillXLoginInputByLocator({
+            selectors: X_PASSWORD_INPUT_SELECTORS,
+            value: password,
+            label: 'password',
+        });
+        await clickXManualButtonBelow({ fieldRect, labels: [/^continue$/i, /^log in$/i, /^login$/i, /^next$/i], label: 'password continue' });
+        await wait(3500);
+        return;
+    } catch (error) {
+        console.log(`X password locator fill fallback needed: ${error.message}`);
+    }
+
+    try {
+        const fieldRect = await fillXInputWithFallback({
+            value: password,
+            label: 'password',
+            pattern: /^password$/i,
+            matcher: input => (
+                input.type === 'password'
+                || input.name === 'password'
+                || input.placeholder === 'password'
+                || input.ariaLabel === 'password'
+            ),
+        });
+        await clickXManualButtonBelow({ fieldRect, labels: [/^continue$/i, /^log in$/i, /^login$/i, /^next$/i], label: 'password continue' });
+    } catch (error) {
+        console.log(`X password coordinate fallback needed: ${error.message}`);
+        if (!await hasXPasswordField()) {
+            throw error;
+        }
+        await typeXCoordinateLoginField({
+            value: password,
+            label: 'password',
+            fieldRatios: [0.39, 0.41, 0.37, 0.43],
+            buttonRatios: [0.78, 0.76, 0.8],
+        });
+    }
+    await wait(3500);
+};
+
+const submitXCredentialsAndConfirmLogin = async ({ accountName, password, stage = 'x login' }) => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+            await dismissXDialogs();
+            await throwIfXBlocked(stage);
+
+            for (let step = 0; step < 4; step += 1) {
+                await throwIfXBlocked(stage);
+                const visibleInputs = await getVisibleXInputDetails();
+                const passwordInput = visibleInputs.find(input => (
+                    input.type === 'password'
+                    || input.name === 'password'
+                    || input.placeholder === 'password'
+                    || input.ariaLabel === 'password'
+                ));
+                if (passwordInput) {
+                    break;
+                }
+                if (await hasXPasswordField()) {
+                    break;
+                }
+
+                const textInput = visibleInputs.find(input => (
+                    input.name === 'text'
+                    || input.placeholder.includes('email or username')
+                    || input.ariaLabel.includes('email or username')
+                    || input.label.includes('email or username')
+                    || input.placeholder.includes('phone, email')
+                    || input.label.includes('username')
+                ) && input.type !== 'password');
+                if (!textInput) {
+                    if (await getXFieldRectByText('email or username|phone, email|username')) {
+                        await fillXUsernameStep(accountName);
+                        continue;
+                    }
+                    const bodyText = await page.locator('body').innerText({ timeout: 1500 }).catch(() => '');
+                    if (/password/i.test(bodyText) && /log in|continue/i.test(bodyText)) {
+                        break;
+                    }
+                    await fillXUsernameStep(accountName);
+                    continue;
+                }
+
+                await fillXUsernameStep(accountName);
+            }
+
+            if (!await waitForXPasswordField(10000)) {
+                await throwIfXBlocked(stage);
+                throw new Error('X did not show the password field after submitting the username.');
+            }
+            await fillXPasswordStep(password);
+            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => null);
+            await wait(6500);
+            await dismissXDialogs();
+
+            if (await isXLoggedIn()) {
+                return true;
+            }
+
+            const loginGate = await getXLoginGate();
+            throw new Error(loginGate || 'X did not create a logged-in session after submitting credentials.');
+        } catch (error) {
+            lastError = error;
+            if (error?.manualVerification) {
+                throw error;
+            }
+            console.log(`X login attempt ${attempt} failed for ${accountName}: ${error.message}`);
+            if (/did not show the password field|temporarily limited|try again later|verification|captcha|phone|sms|text message/i.test(error.message || '')) {
+                const blocker = await getXBlocker().catch(() => null);
+                if (blocker) {
+                    const task = await markXTaskPaused({
+                        phase: 'manual-verification',
+                        message: blocker,
+                        blocker,
+                        stage,
+                    });
+                    throw createXManualVerificationError({ stage, blocker, task });
+                }
+                break;
+            }
+            await wait(1600);
+            if (attempt < 2) {
+                await page.goto(X_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+            }
+        }
+    }
+
+    throw createAutomaticLoginFailureError(`Automatic X login failed for "${accountName}": ${lastError?.message || 'unknown error'}`);
+};
+
+const startXWithSavedSession = async (sessionFile, targetUrl = X_HOME_URL) => {
+    const sessionData = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+    await launchBrowser(sessionData);
+    await page.goto(targetUrl || X_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+    await wait(3500);
+    await dismissXDialogs();
+    return isXLoggedIn();
+};
+
+const connectToXManualChromeSession = async session => {
+    const port = getXManualChromeDebugPort(session.accountKey);
+    const activeSession = getActiveBrowserSession();
+    const browserRef = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+    const contextRef = browserRef.contexts()[0];
+    if (!contextRef) {
+        await browserRef.close().catch(() => null);
+        throw new Error('Dedicated Chrome login window is not open. Start the X row again, then login in that Chrome window.');
+    }
+    const pages = contextRef.pages();
+    const pageRef = pages.find(item => {
+        try {
+            return /(^|\.)x\.com$/i.test(new URL(item.url()).hostname);
+        } catch (_error) {
+            return false;
+        }
+    }) || pages[0] || await contextRef.newPage();
+    activeSession.browser = browserRef;
+    activeSession.context = contextRef;
+    activeSession.page = pageRef;
+    activeSession.usesSystemBrowserProfile = false;
+    installBrowserLifecycleHandlers(activeSession);
+    currentAccountKey = session.accountKey;
+    if (!/x\.com/i.test(pageRef.url())) {
+        await pageRef.goto(X_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+    }
+    await dismissXDialogs();
+    return isXLoggedIn();
+};
+
+const startXWithSystemBrowserProfile = async ({
+    targetUrl = X_HOME_URL,
+    browserChannel = X_SYSTEM_BROWSER_CHANNEL,
+    userDataDir = null,
+    profileDirectory = null,
+    allowCreateProfile = false,
+} = {}) => {
+    await launchBrowser(null, {
+        systemBrowserProfile: true,
+        browserChannel,
+        userDataDir,
+        profileDirectory,
+        allowCreateProfile,
+    });
+    await page.goto(targetUrl || X_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+    await wait(4000);
+    await dismissXDialogs();
+    await throwIfXBlocked('x chrome profile');
+    return isXLoggedIn();
+};
+
+const ensureXTargetPostLoaded = async (target, stage = 'x navigation') => {
+    const expectedContentKey = target?.contentKey || getXContentKey(target?.url);
+    if (!expectedContentKey) {
+        return null;
+    }
+
+    const currentContentKey = getXContentKey(page.url());
+    if (currentContentKey === expectedContentKey) {
+        return currentContentKey;
+    }
+
+    const targetUrl = getXUrlForContentKey(expectedContentKey) || target.url;
+    console.log(`X redirected away from target before ${stage}: ${page.url()}. Returning to ${targetUrl}.`);
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await wait(5000);
+    await dismissXDialogs();
+    await throwIfXBlocked(stage);
+
+    const retriedContentKey = getXContentKey(page.url());
+    if (retriedContentKey !== expectedContentKey) {
+        throw new Error(`X did not open the target post. Expected ${expectedContentKey}, current URL is ${page.url()}.`);
+    }
+
+    return retriedContentKey;
+};
+
+const loginXAndSaveSession = async ({ session, password, targetUrl = X_HOME_URL, stage = 'x login' }) => {
+    await launchBrowser(null, X_USE_SYSTEM_BROWSER_PROFILE ? {
+        systemBrowserProfile: true,
+        browserChannel: session.systemBrowserChannel || X_SYSTEM_BROWSER_CHANNEL,
+        userDataDir: session.systemUserDataDir,
+        profileDirectory: session.systemProfileDirectory,
+    } : {});
+    await page.goto(X_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await submitXCredentialsAndConfirmLogin({
+        accountName: session.xLoginIdentifier || session.accountName || stripPlatformAccountKey(session.accountKey),
+        password,
+        stage,
+    });
+    await saveSession(getXSessionFileForAccountKey(session.accountKey));
+    if (targetUrl) {
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+        await wait(3500);
+        await dismissXDialogs();
+    }
+};
+
+const createXManualVerificationError = ({ stage, blocker, task }) => {
+    const error = new Error(`X verification required during ${stage}. ${blocker} Solve it manually in the visible X browser, then call POST /x/save-session for this account.`);
+    error.manualVerification = true;
+    error.stage = stage;
+    error.blocker = blocker;
+    error.task = task || getActiveTask();
+    return error;
+};
+
+const markXTaskPaused = async ({ phase = 'manual-verification', message, blocker, stage, loginRequired = false, payload = null, session = null } = {}) => {
+    const activeSession = session || getActiveBrowserSession();
+    const task = ensureCurrentTask();
+    const target = payload ? getXActionTargetFromPayload(payload) : {};
+    const pausedAt = new Date().toISOString();
+
+    task.platform = 'x';
+    task.accountKey = activeSession.accountKey;
+    task.accountName = activeSession.accountName || stripPlatformAccountKey(activeSession.accountKey);
+    task.originalUrl = target.url || task.originalUrl || null;
+    task.requestedContentKey = target.contentKey || task.requestedContentKey || null;
+    task.contentKey = target.contentKey || task.contentKey || null;
+    task.rowNumber = target.rowNumber || task.rowNumber || null;
+    task.comment = target.comment || task.comment || null;
+    task.phase = phase;
+    task.error = message || blocker || 'X needs manual verification.';
+    task.verificationRequired = !loginRequired;
+    task.loginRequired = Boolean(loginRequired);
+    task.verificationStage = stage || null;
+    task.verificationBlocker = blocker || null;
+    task.updatedAt = pausedAt;
+    activeSession.manualVerification = {
+        phase,
+        message: task.error,
+        blocker: blocker || null,
+        stage: stage || null,
+        at: pausedAt,
+    };
+    activeSession.manualVerificationResolvedAt = null;
+
+    if (isPageOpen()) {
+        await showBrowserWindow();
+    }
+
+    recordTaskEvent(task, phase, {
+        status: 'running',
+        error: task.error,
+        message: task.error,
+    });
+    return task;
+};
+
+const ensureXBrowserReadyForAction = async (session, payload, target, stage = 'x action') => {
+    const targetUrl = target.url || X_HOME_URL;
+    const validationUrl = X_HOME_URL;
+    if (isPageOpen()) {
+        await dismissXDialogs();
+        if (await isXLoggedIn()) {
+            return 'already-open';
+        }
+    }
+
+    if (isPageOpen()) {
+        await closeBrowser({ preserveTask: true });
+    }
+
+    const sessionFile = getXSessionFileForAccountKey(session.accountKey);
+    if (fs.existsSync(sessionFile)) {
+        console.log(`Trying saved X session for ${session.accountName || session.accountKey}.`);
+        try {
+            if (await startXWithSavedSession(sessionFile, validationUrl)) {
+                currentAccountKey = session.accountKey;
+                return 'saved-session';
+            }
+            await closeBrowser({ preserveTask: true });
+            console.log(`Saved X session did not validate as logged in for ${session.accountName || session.accountKey}.`);
+        } catch (error) {
+            if (error?.manualVerification) {
+                throw error;
+            }
+            console.log(`Saved X session failed for ${session.accountName || session.accountKey}: ${error.message}`);
+            await closeBrowser({ preserveTask: true }).catch(() => null);
+        }
+    }
+
+    if (X_USE_SYSTEM_BROWSER_PROFILE) {
+        const browserChannel = String(session.systemBrowserChannel || X_SYSTEM_BROWSER_CHANNEL).trim().toLowerCase();
+        const browserName = browserChannel === 'chrome' ? 'Chrome' : 'Edge';
+        const profileDirectory = session.systemProfileDirectory || DEFAULT_X_SYSTEM_PROFILE_DIRECTORY;
+        const requestedUserDataDir = session.systemUserDataDir || DEFAULT_X_SYSTEM_USER_DATA_DIR;
+        const profileAttempts = [];
+        if (browserChannel !== 'chrome') {
+            profileAttempts.push({
+                userDataDir: DEDICATED_X_EDGE_USER_DATA_DIR,
+                profileDirectory: DEFAULT_EDGE_PROFILE_DIRECTORY,
+                allowCreateProfile: true,
+                label: `dedicated Edge bot profile "${DEFAULT_EDGE_PROFILE_DIRECTORY}"`,
+            });
+        }
+        profileAttempts.push({
+            userDataDir: requestedUserDataDir,
+            profileDirectory,
+            allowCreateProfile: false,
+            label: `system ${browserName} profile "${profileDirectory}"`,
+        });
+        if (
+            browserChannel !== 'chrome'
+            && path.resolve(requestedUserDataDir) !== path.resolve(DEDICATED_X_EDGE_USER_DATA_DIR)
+            && !profileAttempts.some(attempt => path.resolve(attempt.userDataDir) === path.resolve(DEDICATED_X_EDGE_USER_DATA_DIR))
+        ) {
+            profileAttempts.push({
+                userDataDir: DEDICATED_X_EDGE_USER_DATA_DIR,
+                profileDirectory: DEFAULT_EDGE_PROFILE_DIRECTORY,
+                allowCreateProfile: true,
+                label: `dedicated Edge bot profile "${DEFAULT_EDGE_PROFILE_DIRECTORY}"`,
+            });
+        }
+
+        for (const profileAttempt of profileAttempts) {
+            console.log(`Trying ${profileAttempt.label} for ${session.accountName || session.accountKey}.`);
+            try {
+                if (await startXWithSystemBrowserProfile({
+                    targetUrl: validationUrl,
+                    browserChannel,
+                    userDataDir: profileAttempt.userDataDir,
+                    profileDirectory: profileAttempt.profileDirectory,
+                    allowCreateProfile: profileAttempt.allowCreateProfile,
+                })) {
+                    currentAccountKey = session.accountKey;
+                    session.systemUserDataDir = profileAttempt.userDataDir;
+                    session.systemProfileDirectory = profileAttempt.profileDirectory;
+                    console.log(`Using ${profileAttempt.label} for X account ${session.accountName || session.accountKey}.`);
+                    return 'system-browser-profile';
+                }
+                session.systemUserDataDir = profileAttempt.userDataDir;
+                session.systemProfileDirectory = profileAttempt.profileDirectory;
+                await closeBrowser({ preserveTask: true });
+                break;
+            } catch (error) {
+                if (error?.manualVerification) {
+                    throw error;
+                }
+                await closeBrowser({ preserveTask: true }).catch(() => null);
+                const profileLocked = /(Chrome|Edge) profile .*already open/i.test(error.message || '');
+                const hasFallback = profileAttempts.indexOf(profileAttempt) < profileAttempts.length - 1;
+                if (profileLocked && hasFallback) {
+                    console.log(`${profileAttempt.label} is already open; trying the next X browser profile.`);
+                    continue;
+                }
+                if (profileLocked) {
+                    console.log(`${profileAttempt.label} is already open; falling back to saved X session or login.`);
+                    break;
+                }
+                console.log(`${profileAttempt.label} did not provide an X session for ${session.accountName || session.accountKey}: ${error.message}`);
+            }
+        }
+    }
+
+    const password = getXAccountPassword(payload) || session.accountPassword || '';
+    if (X_AUTO_LOGIN && password) {
+        session.accountPassword = password;
+        console.log(`Logging in to X with credentials for ${session.accountName || session.accountKey}.`);
+        try {
+            await loginXAndSaveSession({ session, password, targetUrl, stage });
+        } catch (error) {
+            if (error?.manualVerification) {
+                throw error;
+            }
+            const pausedTask = await markXTaskPaused({
+                phase: 'login-needed',
+                message: `Automatic X login could not finish for "${session.accountName || stripPlatformAccountKey(session.accountKey)}": ${error.message}. Complete login in the visible browser, then call POST /x/save-session and rerun this row.`,
+                loginRequired: true,
+                payload,
+                session,
+                stage,
+            });
+            throw createXManualVerificationError({ stage, blocker: pausedTask.error, task: pausedTask });
+        }
+        currentAccountKey = session.accountKey;
+        return 'password';
+    }
+
+    openXManualLoginChrome(session);
+    const pausedTask = await markXTaskPaused({
+        phase: 'login-needed',
+        message: `Complete X login in the dedicated Chrome window for "${session.accountName || stripPlatformAccountKey(session.accountKey)}", then click Save & Continue. The controller will save and continue this row.`,
+        loginRequired: true,
+        payload,
+        session,
+        stage,
+    });
+    throw createXManualVerificationError({ stage, blocker: pausedTask.error, task: pausedTask });
+};
+
+const clickXRepostIfNeeded = async task => {
+    await dismissXDialogs();
+    const alreadyReposted = page.locator('[data-testid="unretweet"]').first();
+    if (await alreadyReposted.isVisible({ timeout: 2500 }).catch(() => false)) {
+        task.repostVerification = { verified: true, alreadyReposted: true, at: new Date().toISOString() };
+        return { alreadyReposted: true, verified: true };
+    }
+
+    const repostButton = page.locator('[data-testid="retweet"]').first();
+    if (!await repostButton.isVisible({ timeout: 8000 }).catch(() => false)) {
+        throw new Error('Could not find the X Repost button on this post.');
+    }
+
+    await repostButton.click({ timeout: 8000 });
+    await wait(900);
+
+    const confirmed = await page.waitForFunction(() => {
+        const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+        const isVisible = element => {
+            if (!element) return false;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.right > 0
+                && rect.top < window.innerHeight
+                && rect.left < window.innerWidth
+                && style.display !== 'none'
+                && style.visibility !== 'hidden';
+        };
+        const isEnabled = element => !element.disabled && element.getAttribute('aria-disabled') !== 'true';
+        const roots = Array.from(document.querySelectorAll('[role="menu"], [role="dialog"], [aria-modal="true"]')).filter(isVisible);
+        const candidates = (roots.length ? roots : [document.body])
+            .flatMap(root => Array.from(root.querySelectorAll('[data-testid="retweetConfirm"], button, [role="menuitem"], [role="button"]')))
+            .filter(element => isVisible(element) && isEnabled(element))
+            .filter(element => {
+                const testId = element.getAttribute('data-testid') || '';
+                const label = normalize(element.getAttribute('aria-label') || element.textContent);
+                return testId === 'retweetConfirm' || /^repost$/i.test(label);
+            });
+        const target = candidates[0];
+        if (!target) return false;
+        target.click();
+        return true;
+    }, { timeout: 10000 }).then(handle => handle.jsonValue()).catch(() => false);
+
+    if (!confirmed) {
+        throw new Error('Could not click the X Repost option after opening the repost menu.');
+    }
+
+    await wait(1800);
+    await dismissXDialogs();
+    const verified = await page.locator('[data-testid="unretweet"]').first().isVisible({ timeout: 5000 }).catch(() => false);
+    task.repostVerification = { verified, alreadyReposted: false, at: new Date().toISOString() };
+    if (!verified) {
+        throw new Error('X repost was clicked, but the repost button did not turn active.');
+    }
+    return { alreadyReposted: false, verified: true };
+};
+
+const clickXLikeIfNeeded = async task => {
+    await dismissXDialogs();
+    const unlike = page.locator('[data-testid="unlike"]').first();
+    if (await unlike.isVisible({ timeout: 2500 }).catch(() => false)) {
+        task.likeVerification = { verified: true, alreadyLiked: true, at: new Date().toISOString() };
+        return { alreadyLiked: true, verified: true };
+    }
+
+    const like = page.locator('[data-testid="like"]').first();
+    if (!await like.isVisible({ timeout: 8000 }).catch(() => false)) {
+        throw new Error('Could not find the X Like button on this post.');
+    }
+
+    await like.click({ timeout: 8000 });
+    await wait(1800);
+    await dismissXDialogs();
+    const verified = await page.locator('[data-testid="unlike"]').first().isVisible({ timeout: 3000 }).catch(() => false);
+    task.likeVerification = { verified, alreadyLiked: false, at: new Date().toISOString() };
+    return { alreadyLiked: false, verified };
+};
+
+const fillXReplyComposer = async comment => {
+    const textbox = await firstVisibleLocator([
+        '[role="dialog"] [data-testid="tweetTextarea_0"][role="textbox"]',
+        '[role="dialog"] [data-testid^="tweetTextarea_"][role="textbox"]',
+        '[role="dialog"] div[role="textbox"][contenteditable="true"]',
+        '[role="dialog"] [contenteditable="true"][role="textbox"]',
+        '[data-testid="tweetTextarea_0"][role="textbox"]',
+        '[data-testid^="tweetTextarea_"][role="textbox"]',
+        'div[role="textbox"][contenteditable="true"]',
+        '[contenteditable="true"][role="textbox"]',
+    ]);
+    if (!textbox) {
+        throw new Error('Could not find the X reply textbox.');
+    }
+
+    await textbox.click({ timeout: 8000 });
+    await textbox.fill(comment, { timeout: 10000 }).catch(async () => {
+        await page.keyboard.press('Control+A').catch(() => null);
+        await page.keyboard.press('Backspace').catch(() => null);
+        await page.keyboard.type(comment, { delay: 20 });
+    });
+    await textbox.evaluate((element, value) => {
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+    }, comment).catch(() => null);
+    await wait(1200);
+};
+
+const clickXReplySubmit = async () => {
+    const clicked = await page.waitForFunction(() => {
+        const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+        const isVisible = element => {
+            if (!element) return false;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.right > 0
+                && rect.top < window.innerHeight
+                && rect.left < window.innerWidth
+                && style.display !== 'none'
+                && style.visibility !== 'hidden';
+        };
+        const isEnabled = element => !element.disabled && element.getAttribute('aria-disabled') !== 'true';
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(isVisible);
+        const roots = dialogs.length ? dialogs : [document.body];
+        const candidates = roots
+            .flatMap(root => Array.from(root.querySelectorAll('button, [role="button"]')))
+            .filter(element => isVisible(element) && isEnabled(element))
+            .filter(element => {
+                const testId = element.getAttribute('data-testid') || '';
+                const label = normalize(element.getAttribute('aria-label') || element.textContent);
+                return /^(reply|post)$/i.test(label) || ['tweetButton', 'tweetButtonInline'].includes(testId);
+            })
+            .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+        const target = candidates[0];
+        if (!target) return false;
+        target.click();
+        return true;
+    }, { timeout: 14000 }).then(handle => handle.jsonValue()).catch(() => false);
+
+    if (!clicked) {
+        throw new Error('Could not find the X Reply/Post button.');
+    }
+    return true;
+};
+
+const submitXReply = async (task, comment) => {
+    await dismissXDialogs();
+    const replyButton = page.locator('[data-testid="reply"]').first();
+    if (!await replyButton.isVisible({ timeout: 10000 }).catch(() => false)) {
+        throw new Error('Could not find the X Reply button on this post.');
+    }
+
+    await replyButton.click({ timeout: 8000 });
+    await wait(1300);
+    if (!await page.locator('[role="dialog"]').first().isVisible({ timeout: 5000 }).catch(() => false)) {
+        await wait(1000);
+    }
+    const loginGate = await getXLoginGate();
+    if (loginGate) {
+        throw new Error(loginGate);
+    }
+
+    await fillXReplyComposer(comment);
+    await clickXReplySubmit();
+    await wait(5000);
+    await dismissXDialogs();
+
+    const expected = normalizeCommentValue(comment);
+    const verification = await page.waitForFunction(text => {
+        const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+        const bodyText = normalize(document.body?.innerText || '');
+        return bodyText.includes(text)
+            || /your post was sent|your reply was sent|post sent|reply sent/i.test(bodyText);
+    }, expected, { timeout: 18000 }).then(() => true).catch(() => false);
+
+    task.commentVerification = {
+        visible: verification,
+        method: verification ? 'x-visible-reply-or-toast' : 'x-submit-clicked',
+    };
+
+    if (!verification) {
+        throw new Error('X reply was submitted, but the posted reply was not visibly verified.');
+    }
+    await dismissXDialogs();
+};
+
+const markXTaskCompleted = async task => {
+    if (!task?.accountKey || !task?.contentKey) {
+        return null;
+    }
+    if (!task.commentVerification?.visible) {
+        throw new Error('X reply was not visibly verified, so this row will not be marked done.');
+    }
+    if (!task.repostVerification?.verified) {
+        throw new Error('X repost was not visibly verified, so this row will not be marked done.');
+    }
+
+    const completedAt = new Date().toISOString();
+    const currentUrl = isPageOpen() ? page.url() : null;
+    const currentContentKey = currentUrl ? getXContentKey(currentUrl) : null;
+    const verifiedPostUrl = currentContentKey === task.contentKey && isXStatusContentKey(currentContentKey)
+        ? currentUrl
+        : task.finalUrl || task.originalUrl;
+    const completedAction = {
+        platform: 'x',
+        account: task.accountName || stripPlatformAccountKey(task.accountKey),
+        accountKey: task.accountKey,
+        contentKey: task.contentKey,
+        rowNumber: task.rowNumber || null,
+        originalUrl: task.originalUrl,
+        finalUrl: verifiedPostUrl,
+        completedAt,
+        comment: task.comment || null,
+        verification: task.commentVerification,
+        repostVerification: task.repostVerification,
+        likeVerification: task.likeVerification || null,
+    };
+    const thumbnailUrl = await captureActionThumbnail(task);
+    if (thumbnailUrl) {
+        completedAction.thumbnailUrl = thumbnailUrl;
+        task.thumbnailUrl = thumbnailUrl;
+    }
+
+    const history = readActionHistory();
+    history.completed[getHistoryKey(task.accountKey, task.contentKey)] = completedAction;
+    writeActionHistory(history);
+
+    task.phase = 'done';
+    task.completedAt = completedAt;
+    task.completedAction = completedAction;
+    task.updatedAt = completedAt;
+    upsertDashboardPost({
+        platform: 'x',
+        account: completedAction.account,
+        accountKey: task.accountKey,
+        contentKey: task.contentKey,
+        rowNumber: task.rowNumber || null,
+        url: completedAction.originalUrl || completedAction.finalUrl,
+        status: 'done',
+        phase: 'done',
+        comment: task.comment || null,
+        verification: completedAction.verification,
+        repostVerification: completedAction.repostVerification,
+        likeVerification: completedAction.likeVerification,
+        startedAt: task.startedAt || null,
+        completedAt,
+        thumbnailUrl: completedAction.thumbnailUrl || null,
+    });
+    recordTaskEvent(task, 'done', {
+        status: 'done',
+        completedAt,
+        thumbnailUrl: completedAction.thumbnailUrl || null,
+        message: 'X repost, like and reply completed',
+    });
+    console.log(`Recorded completed X action: ${getHistoryKey(task.accountKey, task.contentKey)}`);
+    return completedAction;
+};
+
+const performXAction = async (session, payload) => {
+    const target = getXActionTargetFromPayload(payload);
+    if (!target.url) {
+        throw new Error('Missing x_url. Send the X post URL from the x_accounts sheet.');
+    }
+    if (!target.comment) {
+        throw new Error('Missing comment_text. Send the reply text from the x_accounts sheet.');
+    }
+
+    const completedBefore = await returnCompletedXActionWithoutBrowser(session, target);
+    if (completedBefore) {
+        return completedBefore;
+    }
+
+    await waitForSchedule(payload, `X row ${target.rowNumber || target.contentKey || target.url}`);
+
+    const completedAfterSchedule = await returnCompletedXActionWithoutBrowser(session, target);
+    if (completedAfterSchedule) {
+        return completedAfterSchedule;
+    }
+
+    const now = new Date().toISOString();
+    setActiveTask({
+        platform: 'x',
+        accountKey: session.accountKey,
+        accountName: session.accountName || stripPlatformAccountKey(session.accountKey),
+        originalUrl: target.url,
+        requestedContentKey: target.contentKey,
+        contentKey: target.contentKey,
+        rowNumber: target.rowNumber,
+        comment: target.comment,
+        skip: false,
+        redirected: false,
+        redirectBrowsingDone: false,
+        phase: 'starting',
+        startedAt: now,
+        updatedAt: now,
+    });
+    const task = ensureCurrentTask();
+    recordTaskEvent(task, 'starting', { status: 'running' });
+
+    if (canUseXApiForPayload(payload, session)) {
+        return performXApiAction({ session, payload, target, task });
+    }
+
+    await ensureXBrowserReadyForAction(session, payload, target, 'x action');
+
+    task.phase = 'navigating';
+    task.updatedAt = new Date().toISOString();
+    recordTaskEvent(task, 'navigating', { status: 'running' });
+    await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await wait(5000);
+    await dismissXDialogs();
+    await throwIfXBlocked('x navigation');
+
+    if (!await isXLoggedIn()) {
+        await ensureXBrowserReadyForAction(session, payload, target, 'x post-login navigation');
+        await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await wait(5000);
+        await dismissXDialogs();
+    }
+
+    const loadedContentKey = await ensureXTargetPostLoaded(target, 'x action');
+    task.finalUrl = page.url();
+    task.contentKey = loadedContentKey || target.contentKey;
+    task.phase = 'loaded';
+    task.updatedAt = new Date().toISOString();
+    recordTaskEvent(task, 'loaded', { status: 'running' });
+
+    const completedAfterNavigation = getCompletedAction(task.accountKey, task.contentKey);
+    if (completedAfterNavigation) {
+        return completedAfterNavigation;
+    }
+
+    task.phase = 'reposting';
+    task.updatedAt = new Date().toISOString();
+    recordTaskEvent(task, 'reposting', { status: 'running' });
+    await clickXRepostIfNeeded(task);
+
+    task.phase = 'liking';
+    task.updatedAt = new Date().toISOString();
+    recordTaskEvent(task, 'liking', { status: 'running' });
+    await clickXLikeIfNeeded(task);
+
+    task.phase = 'commenting';
+    task.updatedAt = new Date().toISOString();
+    recordTaskEvent(task, 'commenting', { status: 'running' });
+    await submitXReply(task, target.comment);
+
+    const completedAction = await markXTaskCompleted(task);
+    await closeBrowserAfterCompletedTask(session, 'x action completion');
+    return completedAction;
+};
+
+const getXResumePayloadFromTask = (task, fallbackPayload = {}) => {
+    if (!task || !isResumableActionTask(task)) {
+        return null;
+    }
+    const url = task.originalUrl || task.finalUrl || getXUrlForContentKey(task.contentKey || task.requestedContentKey);
+    const comment = task.comment || fallbackPayload.comment_text || fallbackPayload.comment;
+    if (!url || !comment) {
+        return null;
+    }
+    return {
+        ...fallbackPayload,
+        platform: 'x',
+        x_username: task.accountName || stripPlatformAccountKey(task.accountKey),
+        account_username: task.accountName || stripPlatformAccountKey(task.accountKey),
+        x_url: url,
+        row_number: task.rowNumber || fallbackPayload.row_number || fallbackPayload.rowNumber || null,
+        comment_text: comment,
+    };
+};
+
+const sendXManualVerificationResponse = (res, action, errorOrTask, extra = {}) => {
+    const task = errorOrTask?.manualVerification ? (errorOrTask.task || getActiveTask()) : errorOrTask;
+    const phase = extra.phase || task?.phase || (task?.loginRequired ? 'login-needed' : 'manual-verification');
+    return res.status(extra.statusCode || 423).json({
+        success: false,
+        completed: false,
+        status: 'running',
+        actionStatus: 'running',
+        action,
+        platform: 'x',
+        account: task?.accountName || stripPlatformAccountKey(task?.accountKey) || extra.account || null,
+        accountKey: task?.accountKey || null,
+        contentKey: task?.contentKey || task?.requestedContentKey || extra.contentKey || null,
+        rowNumber: task?.rowNumber || extra.rowNumber || null,
+        ...runningSheetFields(task?.rowNumber || extra.rowNumber || null),
+        phase,
+        paused: true,
+        verificationRequired: phase !== 'login-needed',
+        loginRequired: phase === 'login-needed',
+        browserVisible: Boolean(isPageOpen()),
+        message: extra.message || errorOrTask?.message || task?.error || 'X login/verification is still waiting.',
+        next: extra.next || 'Finish X login/verification in the visible browser, then call POST /x/save-session; it will save and resume this row.',
+    });
+};
+
 const startManualVerificationAutoChecks = () => {
     setInterval(() => {
         for (const session of browserSessions.values()) {
             if (
                 session.manualVerificationAutoCheckInFlight
+                || getItemPlatform(session) === 'x'
                 || session.pendingOperations > 0
                 || !session.currentTask
                 || !isManualVerificationTask(session.currentTask)
@@ -6116,10 +8598,13 @@ const hasDashboardVisibleSessionWork = session => {
     return Boolean(pageOpen || hasPendingWork || hasTarget);
 };
 
-const getActiveSessionsSummary = () => {
+const getActiveSessionsSummary = ({ platform = null } = {}) => {
+    const requestedPlatform = normalizePlatform(platform);
     return Array.from(browserSessions.values())
+        .filter(session => !requestedPlatform || getItemPlatform(session) === requestedPlatform)
         .filter(hasDashboardVisibleSessionWork)
         .map(session => ({
+            platform: getItemPlatform(session),
             account: session.accountName || session.accountKey,
             accountKey: session.accountKey,
             browserStarted: Boolean(session.page && !session.page.isClosed()),
@@ -6132,6 +8617,7 @@ const getActiveSessionsSummary = () => {
             url: session.page && !session.page.isClosed() ? session.page.url() : null,
             currentTask: session.currentTask
                 ? {
+                    platform: getItemPlatform(session.currentTask),
                     contentKey: session.currentTask.contentKey || null,
                     requestedContentKey: session.currentTask.requestedContentKey || null,
                     finalContentKey: session.currentTask.finalContentKey || null,
@@ -6156,14 +8642,16 @@ const getActiveSessionsSummary = () => {
         }));
 };
 
-const getActionHistorySummary = ({ accountKey, contentKey, limit = 120 } = {}) => {
+const getActionHistorySummary = ({ accountKey, contentKey, platform = null, limit = 120 } = {}) => {
     const normalizedAccountKey = normalizeAccountName(accountKey);
+    const requestedPlatform = normalizePlatform(platform);
     const history = readActionHistory();
     const completedEvents = Object.values(history.completed).map(completed => ({
-        id: `completed-${getHistoryKey(normalizeAccountName(completed.account), completed.contentKey)}`,
+        id: `completed-${getHistoryKey(normalizeAccountName(completed.accountKey || completed.account), completed.contentKey)}`,
         time: completed.completedAt,
-        account: completed.account || normalizeAccountName(completed.account) || 'default',
-        accountKey: normalizeAccountName(completed.account) || 'default',
+        platform: getItemPlatform(completed),
+        account: completed.account || stripPlatformAccountKey(normalizeAccountName(completed.accountKey || completed.account)) || 'default',
+        accountKey: normalizeAccountName(completed.accountKey || completed.account) || 'default',
         action: 'done',
         status: 'done',
         actionState: 'done',
@@ -6175,6 +8663,7 @@ const getActionHistorySummary = ({ accountKey, contentKey, limit = 120 } = {}) =
     }));
 
     return [...history.events, ...completedEvents]
+        .filter(event => !requestedPlatform || getItemPlatform(event) === requestedPlatform)
         .filter(event => !normalizedAccountKey || event.accountKey === normalizedAccountKey)
         .filter(event => !contentKey || event.contentKey === contentKey)
         .sort((a, b) => new Date(b.time || 0).getTime() - new Date(a.time || 0).getTime())
@@ -6198,8 +8687,9 @@ app.get('/monitor', (_req, res) => {
     res.type('html').send(getMonitorHtml());
 });
 
-app.get('/health', (_req, res) => {
-    const activeSessions = getActiveSessionsSummary();
+app.get('/health', (req, res) => {
+    const platform = normalizePlatform(req.query.platform);
+    const activeSessions = getActiveSessionsSummary({ platform });
     const activeTask = getActiveTask();
     res.json({
         success: true,
@@ -6208,9 +8698,10 @@ app.get('/health', (_req, res) => {
         savedAccounts: getSavedAccounts(),
         currentAccount: currentAccountKey || null,
         activeSessions,
-        dashboardPosts: getDashboardPostsSummary(),
+        dashboardPosts: getDashboardPostsSummary({ platform }),
         currentTask: activeTask
             ? {
+                platform: getItemPlatform(activeTask),
                 account: activeTask.accountName || activeTask.accountKey,
                 contentKey: activeTask.contentKey || null,
                 phase: activeTask.phase || null,
@@ -6231,15 +8722,17 @@ app.get('/history', (req, res) => {
         events: getActionHistorySummary({
             accountKey: req.query.accountKey,
             contentKey: req.query.contentKey,
+            platform: req.query.platform,
             limit: req.query.limit,
         }),
     });
 });
 
-app.get('/dashboard/posts', (_req, res) => {
+app.get('/dashboard/posts', (req, res) => {
+    const platform = normalizePlatform(req.query.platform);
     res.json({
         success: true,
-        posts: getDashboardPostsSummary(),
+        posts: getDashboardPostsSummary({ platform }),
     });
 });
 
@@ -6247,19 +8740,22 @@ app.post('/dashboard/posts', (req, res) => {
     try {
         const payload = getPayload(req);
         const rows = getDashboardRowsFromPayload(payload);
+        const currentRow = getDashboardCurrentRowFromPayload(payload);
+        const platform = getDashboardRowsPlatform(payload, rows, currentRow);
         const posts = rows
-            .map(row => getDashboardPostFromPayload(row, { source: 'sheet' }))
+            .map(row => getDashboardPostFromPayload(row, { source: 'sheet', platform }))
             .filter(Boolean);
         posts.forEach(rememberDashboardPost);
-        const currentRow = getDashboardCurrentRowFromPayload(payload);
         const currentPost = currentRow
-            ? getDashboardPostFromPayload(currentRow, { source: 'sheet' })
+            ? getDashboardPostFromPayload(currentRow, { source: 'sheet', platform })
             : null;
         const storedPosts = replaceDashboardPosts(posts, {
+            platform,
             activePostKey: currentPost ? getDashboardPostKey(currentPost) : null,
         });
         const responseRows = currentRow ? [currentRow] : (rows.length ? rows : [{}]);
-        res.json(responseRows.map(row => normalizeDashboardPassthroughRow(row, storedPosts.length)));
+        const history = readActionHistory();
+        res.json(responseRows.map(row => normalizeDashboardSheetSyncRow(row, storedPosts.length, history)));
     } catch (error) {
         console.error('Dashboard posts error:', error.message);
         sendError(res, error);
@@ -6352,6 +8848,230 @@ app.post('/schedule/wait', async (req, res) => {
         res.json({ success: true, ...schedule });
     } catch (error) {
         console.error('Schedule wait error:', error.message);
+        sendError(res, error);
+    }
+});
+
+app.post(['/x/action', '/x/reply'], async (req, res) => {
+    let payload = null;
+    let session = null;
+    try {
+        payload = getPayload(req);
+        session = getXSessionForRequestPayload(payload);
+        session.accountPassword = getXAccountPassword(payload) || session.accountPassword;
+
+        await runInBrowserSession(session, async () => {
+            const completedAction = await performXAction(session, payload);
+            res.json({
+                success: true,
+                completed: true,
+                status: 'done',
+                actionStatus: 'done',
+                action: 'x-action',
+                platform: 'x',
+                account: session.accountName || stripPlatformAccountKey(session.accountKey),
+                accountKey: session.accountKey,
+                contentKey: completedAction?.contentKey || null,
+                completedAction,
+                ...completedActionSheetFields(completedAction),
+            });
+        }, 'x-action');
+    } catch (error) {
+        console.error('X action error:', error.message);
+        if (error?.manualVerification) {
+            return sendXManualVerificationResponse(res, 'x-action', error, { statusCode: 200 });
+        }
+        const target = payload ? getXActionTargetFromPayload(payload) : {};
+        const account = session?.accountName || stripPlatformAccountKey(session?.accountKey) || payload?.account_username || null;
+        res.json({
+            success: false,
+            completed: false,
+            status: 'failed',
+            actionStatus: 'failed',
+            action: 'x-action',
+            platform: 'x',
+            account,
+            accountKey: session?.accountKey || null,
+            contentKey: target.contentKey || null,
+            rowNumber: target.rowNumber || null,
+            error: error.message,
+            message: error.message,
+            ...failedSheetFields(target.rowNumber || null, error.message),
+        });
+    }
+});
+
+app.post('/x/save-session', async (req, res) => {
+    try {
+        const payload = getPayload(req);
+        const session = getXSessionForRequestPayload(payload);
+        await runInBrowserSession(session, async () => {
+            let sessionFile = getXSessionFileForAccountKey(session.accountKey);
+            if (!isPageOpen()) {
+                const loggedIn = await connectToXManualChromeSession(session);
+                if (!loggedIn) {
+                    const task = await markXTaskPaused({
+                        phase: 'login-needed',
+                        message: 'X is not logged in yet in the dedicated Chrome window. Finish login, then click Save & Continue again.',
+                        loginRequired: true,
+                        payload,
+                        session,
+                        stage: 'x save-session',
+                    });
+                    return sendXManualVerificationResponse(res, 'x-save-session', task, {
+                        message: task.error,
+                    });
+                }
+                await saveSession(sessionFile);
+                await hideBrowserWindow();
+            } else {
+                await dismissXDialogs();
+                if (!await isXLoggedIn()) {
+                    const task = await markXTaskPaused({
+                        phase: 'login-needed',
+                        message: 'X is not logged in yet. Complete login in the visible browser, then save again.',
+                        loginRequired: true,
+                        payload,
+                        session,
+                        stage: 'x save-session',
+                    });
+                    return sendXManualVerificationResponse(res, 'x-save-session', task, {
+                        message: task.error,
+                    });
+                }
+                await saveSession(sessionFile);
+                await hideBrowserWindow();
+            }
+
+            currentAccountKey = session.accountKey;
+            session.manualVerification = null;
+            session.manualVerificationResolvedAt = null;
+            const task = getActiveTask();
+            const resumePayload = AUTO_RESUME_AFTER_MANUAL_VERIFICATION
+                ? (getXResumePayloadFromTask(task, payload) || getStoredXResumePayloadForSession(session, payload))
+                : null;
+            if (task && isManualVerificationTask(task)) {
+                task.platform = 'x';
+                task.phase = 'ready';
+                task.error = null;
+                task.verificationRequired = false;
+                task.loginRequired = false;
+                task.updatedAt = new Date().toISOString();
+                recordTaskEvent(task, 'ready', { status: 'running' });
+            }
+
+            if (resumePayload) {
+                const completedAction = await performXAction(session, resumePayload);
+                return res.json({
+                    success: true,
+                    completed: true,
+                    resumed: true,
+                    status: 'done',
+                    actionStatus: 'done',
+                    action: 'x-action',
+                    platform: 'x',
+                    account: session.accountName || stripPlatformAccountKey(session.accountKey),
+                    accountKey: session.accountKey,
+                    sessionSaved: true,
+                    sessionFile,
+                    contentKey: completedAction?.contentKey || null,
+                    completedAction,
+                    ...completedActionSheetFields(completedAction),
+                });
+            }
+
+            await hideBrowserWindow();
+            res.json({
+                success: true,
+                platform: 'x',
+                account: session.accountName || stripPlatformAccountKey(session.accountKey),
+                accountKey: session.accountKey,
+                sessionSaved: true,
+                sessionFile,
+            });
+        }, 'x-save-session');
+    } catch (error) {
+        console.error('X save-session error:', error.message);
+        if (error?.manualVerification) {
+            return sendXManualVerificationResponse(res, 'x-save-session', error);
+        }
+        sendError(res, error);
+    }
+});
+
+app.post('/x/import-chrome-session', async (req, res) => {
+    try {
+        const payload = getPayload(req);
+        const session = getXSessionForRequestPayload(payload);
+        const result = await importXSessionFromChromeProfile({
+            session,
+            chromeUserDataDir: payload.chromeUserDataDir || payload.chrome_user_data_dir,
+            chromeProfileDirectory: payload.chromeProfileDirectory || payload.chrome_profile_directory || payload.profile || payload.profileDirectory,
+        });
+        currentAccountKey = session.accountKey;
+        session.manualVerification = null;
+        session.manualVerificationResolvedAt = null;
+        res.json({
+            success: true,
+            platform: 'x',
+            account: session.accountName || stripPlatformAccountKey(session.accountKey),
+            accountKey: session.accountKey,
+            sessionSaved: true,
+            sessionFile: result.sessionFile,
+            chromeUserDataDir: result.userDataDir,
+            chromeProfileDirectory: result.profileDirectory,
+            next: 'Rerun the X row. It will use this saved session instead of logging in.',
+        });
+    } catch (error) {
+        console.error('X Chrome session import error:', error.message);
+        sendError(res, error);
+    }
+});
+
+app.post('/x/import-edge-session', async (req, res) => {
+    try {
+        const payload = getPayload(req);
+        const session = getXSessionForRequestPayload(payload);
+        const result = await importXSessionFromEdgeProfile({
+            session,
+            edgeUserDataDir: payload.edgeUserDataDir || payload.edge_user_data_dir || payload.userDataDir || payload.user_data_dir,
+            edgeProfileDirectory: payload.edgeProfileDirectory || payload.edge_profile_directory || payload.profile || payload.profileDirectory,
+        });
+        currentAccountKey = session.accountKey;
+        session.manualVerification = null;
+        session.manualVerificationResolvedAt = null;
+        res.json({
+            success: true,
+            platform: 'x',
+            account: session.accountName || stripPlatformAccountKey(session.accountKey),
+            accountKey: session.accountKey,
+            sessionSaved: true,
+            sessionFile: result.sessionFile,
+            edgeUserDataDir: result.userDataDir,
+            edgeProfileDirectory: result.profileDirectory,
+            next: 'Rerun the X row. It will use this saved Edge session instead of logging in.',
+        });
+    } catch (error) {
+        console.error('X Edge session import error:', error.message);
+        sendError(res, error);
+    }
+});
+
+app.post('/x/close', async (req, res) => {
+    try {
+        const payload = getPayload(req);
+        const session = getXSessionForRequestPayload(payload);
+        await runInBrowserSession(session, async () => {
+            await closeBrowser();
+            res.json({
+                success: true,
+                platform: 'x',
+                account: session.accountName || stripPlatformAccountKey(session.accountKey),
+                accountKey: session.accountKey,
+            });
+        }, 'x-close');
+    } catch (error) {
+        console.error('X close error:', error.message);
         sendError(res, error);
     }
 });

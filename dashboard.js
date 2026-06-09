@@ -3,7 +3,7 @@ const getMonitorHtml = () => `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Instagram Monitor</title>
+  <title>Social Monitor</title>
   <style>
     :root {
       color-scheme: light;
@@ -23,6 +23,7 @@ const getMonitorHtml = () => `<!doctype html>
       --ink: #0f1720;
       --accent: #2f68c5;
       --accent-soft: rgba(47, 104, 197, .12);
+      --rail-width: 84px;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
     }
     * { box-sizing: border-box; }
@@ -33,6 +34,198 @@ const getMonitorHtml = () => `<!doctype html>
         linear-gradient(180deg, #ffffff 0, #f4f6f8 260px, #eef2f6 100%);
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    }
+    body.rail-collapsed {
+      --rail-width: 0px;
+    }
+    .app-shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: var(--rail-width) minmax(0, 1fr);
+      transition: grid-template-columns .22s ease;
+    }
+    .activity-rail {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      width: var(--rail-width);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 10px;
+      background:
+        linear-gradient(180deg, #1d2026 0, #15181d 48%, #121519 100%);
+      border-right: 1px solid #282d34;
+      box-shadow: inset -1px 0 0 rgba(255, 255, 255, .04), 8px 0 26px rgba(19, 24, 31, .08);
+      overflow: visible;
+      transition: width .24s ease, padding .24s ease, border-color .2s ease, box-shadow .24s ease;
+    }
+    .rail-toggle {
+      width: 46px;
+      height: 42px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, .08);
+      border-radius: 13px;
+      background: rgba(255, 255, 255, .06);
+      color: #d7dde5;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 12px 26px rgba(0, 0, 0, .18);
+      transition: background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease, box-shadow .18s ease;
+    }
+    .rail-toggle:hover,
+    .rail-toggle:focus-visible {
+      background: rgba(255, 255, 255, .12);
+      border-color: rgba(255, 255, 255, .18);
+      color: #fff;
+      outline: none;
+    }
+    .rail-toggle:focus-visible {
+      box-shadow: 0 0 0 2px rgba(255, 255, 255, .2), 0 12px 26px rgba(0, 0, 0, .18);
+    }
+    .rail-toggle-lines {
+      width: 20px;
+      display: grid;
+      gap: 4px;
+    }
+    .rail-toggle-lines span {
+      height: 2px;
+      border-radius: 999px;
+      background: currentColor;
+      transition: transform .18s ease, width .18s ease, opacity .18s ease;
+    }
+    .rail-toggle-lines span:nth-child(2) {
+      width: 15px;
+    }
+    .rail-toggle-lines span:nth-child(3) {
+      width: 11px;
+    }
+    .platform-dock {
+      width: 100%;
+      display: grid;
+      justify-items: center;
+      gap: 14px;
+      margin-top: 68px;
+      transition: opacity .18s ease, transform .24s ease, visibility .18s ease;
+    }
+    .platform-tab {
+      position: relative;
+      width: 58px;
+      height: 58px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 16px;
+      background: transparent;
+      color: #c9d1d9;
+      cursor: pointer;
+      transition: background .18s ease, box-shadow .18s ease, color .18s ease, transform .18s ease;
+    }
+    .platform-tab:hover,
+    .platform-tab:focus-visible {
+      background: rgba(255, 255, 255, .09);
+      color: #fff;
+      transform: translateY(-1px);
+      outline: none;
+    }
+    .platform-tab:focus-visible {
+      box-shadow: 0 0 0 2px rgba(255, 255, 255, .22);
+    }
+    .platform-tab.active {
+      background: rgba(255, 255, 255, .13);
+      color: #fff;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 14px 30px rgba(0, 0, 0, .22);
+    }
+    .platform-tab.active::before {
+      content: "";
+      position: absolute;
+      left: -9px;
+      top: 10px;
+      bottom: 10px;
+      width: 4px;
+      border-radius: 0 999px 999px 0;
+      background: #fff;
+      box-shadow: 0 0 18px rgba(255, 255, 255, .34);
+    }
+    .platform-logo,
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+    .platform-logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 13px;
+      transform: translateZ(0);
+      transition: box-shadow .18s ease, transform .18s ease;
+    }
+    .platform-logo svg {
+      display: block;
+      width: 76%;
+      height: 76%;
+    }
+    .brand-mark svg {
+      display: block;
+      width: 68%;
+      height: 68%;
+    }
+    .platform-tab.active .platform-logo {
+      transform: scale(1.04);
+    }
+    body.rail-collapsed .activity-rail {
+      padding: 0;
+      overflow: hidden;
+      background: transparent;
+      border-color: transparent;
+      border-right-width: 0;
+      box-shadow: none;
+    }
+    body.rail-collapsed .rail-toggle {
+      position: fixed;
+      left: 14px;
+      top: 16px;
+      z-index: 60;
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      background: rgba(22, 25, 30, .95);
+      border-color: rgba(255, 255, 255, .12);
+      box-shadow: 0 18px 36px rgba(15, 23, 32, .24), inset 0 1px 0 rgba(255, 255, 255, .12);
+    }
+    body.rail-collapsed .rail-toggle-lines {
+      width: 20px;
+      gap: 4px;
+    }
+    body.rail-collapsed .rail-toggle-lines span:nth-child(2),
+    body.rail-collapsed .rail-toggle-lines span:nth-child(3) {
+      width: 20px;
+    }
+    body.rail-collapsed .platform-dock {
+      opacity: 0;
+      pointer-events: none;
+      visibility: hidden;
+      transform: translateX(-18px);
+    }
+    body.rail-collapsed header {
+      padding-left: 76px;
+    }
+    .logo-instagram {
+      color: #fff;
+      background:
+        radial-gradient(circle at 30% 107%, #fdf497 0 10%, #fd5949 45%, #d6249f 62%, #285aeb 90%);
+      box-shadow: 0 10px 24px rgba(214, 36, 159, .26), inset 0 1px 0 rgba(255, 255, 255, .3);
+    }
+    .logo-x {
+      color: #fff;
+      background: #000;
+      border: 1px solid rgba(255, 255, 255, .1);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .16);
+    }
+    .workspace-shell {
+      min-width: 0;
     }
     header {
       position: sticky;
@@ -56,17 +249,11 @@ const getMonitorHtml = () => `<!doctype html>
       min-width: 0;
     }
     .brand-mark {
-      display: grid;
-      place-items: center;
       width: 42px;
       height: 42px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      color: #fff;
-      background: #17212b;
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 10px 18px rgba(23, 33, 43, .18);
-      font-size: 13px;
-      font-weight: 900;
     }
     h1 { margin: 0; font-size: 16px; letter-spacing: 0; font-weight: 700; }
     .brand-sub {
@@ -210,6 +397,18 @@ const getMonitorHtml = () => `<!doctype html>
       box-shadow: 0 1px 0 rgba(255, 255, 255, .8);
     }
     .history-btn:hover { border-color: var(--blue); color: var(--blue); }
+    .save-session-btn {
+      min-height: 30px;
+      padding: 5px 9px;
+      border: 1px solid rgba(22, 132, 58, .34);
+      border-radius: 6px;
+      background: rgba(22, 132, 58, .08);
+      color: var(--ok);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .save-session-btn[disabled] { opacity: .55; cursor: wait; }
     .queue {
       color: var(--warn);
       font-size: 12px;
@@ -234,7 +433,7 @@ const getMonitorHtml = () => `<!doctype html>
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .pill.running, .pill.ready, .pill.loaded, .pill.liking, .pill.liked, .pill.commenting, .pill.navigating, .pill.login, .pill.starting, .pill.validating-session {
+    .pill.running, .pill.ready, .pill.loaded, .pill.reposting, .pill.reposted, .pill.liking, .pill.liked, .pill.commenting, .pill.navigating, .pill.login, .pill.starting, .pill.validating-session {
       color: var(--blue);
       border-color: rgba(47, 104, 197, .36);
       background: rgba(47, 104, 197, .08);
@@ -570,6 +769,37 @@ const getMonitorHtml = () => `<!doctype html>
       padding: 28px;
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, .7);
     }
+    .platform-empty {
+      min-height: min(560px, calc(100vh - 150px));
+      display: grid;
+      place-items: center;
+      border: 1px dashed var(--line-strong);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .72);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .7);
+    }
+    .platform-empty-inner {
+      display: grid;
+      justify-items: center;
+      gap: 12px;
+      padding: 32px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .platform-empty-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 14px;
+    }
+    .platform-empty-title {
+      color: var(--ink);
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .platform-empty-text {
+      font-size: 13px;
+      font-weight: 500;
+    }
     .history-inline {
       position: absolute;
       inset: 8px;
@@ -640,6 +870,16 @@ const getMonitorHtml = () => `<!doctype html>
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (max-width: 760px) {
+      :root { --rail-width: 68px; }
+      body.rail-collapsed { --rail-width: 0px; }
+      .activity-rail { padding: 18px 7px; }
+      .rail-toggle { width: 42px; height: 38px; border-radius: 12px; }
+      .platform-dock { gap: 11px; margin-top: 48px; }
+      .platform-tab { width: 48px; height: 48px; border-radius: 14px; }
+      .platform-logo { width: 36px; height: 36px; border-radius: 11px; }
+      body.rail-collapsed .activity-rail { padding: 0; }
+      body.rail-collapsed .rail-toggle { left: 10px; top: 12px; width: 40px; height: 40px; border-radius: 13px; }
+      body.rail-collapsed header { padding-left: 62px; }
       header { align-items: flex-start; flex-direction: column; }
       .summary { white-space: normal; }
       .workspace-head { align-items: flex-start; flex-direction: column; }
@@ -659,33 +899,152 @@ const getMonitorHtml = () => `<!doctype html>
   </style>
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <div class="brand-mark">IG</div>
-      <div>
-        <h1>Instagram Monitor</h1>
-        <div class="brand-sub">Accounts</div>
+  <div class="app-shell">
+    <aside class="activity-rail" aria-label="Platform navigation">
+      <button class="rail-toggle" id="railToggle" type="button" aria-label="Collapse platform panel" aria-expanded="true" title="Collapse panel">
+        <span class="rail-toggle-lines" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+        </span>
+      </button>
+      <div class="platform-dock">
+        <button class="platform-tab active" type="button" data-platform="instagram" aria-label="Instagram monitor" aria-pressed="true" title="Instagram">
+          <span class="platform-logo logo-instagram" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <rect x="5.4" y="5.4" width="13.2" height="13.2" rx="4.1" stroke="currentColor" stroke-width="1.8"></rect>
+              <circle cx="12" cy="12" r="3.15" stroke="currentColor" stroke-width="1.8"></circle>
+              <circle cx="16.25" cy="7.75" r="1.05" fill="currentColor"></circle>
+            </svg>
+          </span>
+        </button>
+        <button class="platform-tab" type="button" data-platform="x" aria-label="X monitor" aria-pressed="false" title="X">
+          <span class="platform-logo logo-x" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18.9 1.2h3.7l-8.1 9.2L24 22.8h-7.4l-5.8-7.6-6.6 7.6H.5l8.6-9.8L0 1.2h7.6l5.2 6.9 6.1-6.9Zm-1.3 18.6h2L6.5 3.3H4.3l13.3 16.5Z"></path>
+            </svg>
+          </span>
+        </button>
       </div>
+    </aside>
+    <div class="workspace-shell">
+      <header>
+        <div class="brand">
+          <div class="brand-mark logo-instagram" id="brandMark">
+            <svg viewBox="0 0 24 24" fill="none">
+              <rect x="5.4" y="5.4" width="13.2" height="13.2" rx="4.1" stroke="currentColor" stroke-width="1.8"></rect>
+              <circle cx="12" cy="12" r="3.15" stroke="currentColor" stroke-width="1.8"></circle>
+              <circle cx="16.25" cy="7.75" r="1.05" fill="currentColor"></circle>
+            </svg>
+          </div>
+          <div>
+            <h1 id="workspaceName">Instagram Monitor</h1>
+            <div class="brand-sub" id="workspaceSub">Accounts</div>
+          </div>
+        </div>
+        <div class="summary" id="summary">Connecting...</div>
+      </header>
+      <main>
+        <section class="workspace-head">
+          <div class="workspace-title">
+            <div class="eyebrow" id="workspaceEyebrow">Instagram Dashboard</div>
+            <h2 id="workspaceHeading">Actions</h2>
+          </div>
+          <div class="refresh-note" id="refreshNote">Connecting...</div>
+        </section>
+        <div class="grid" id="grid"></div>
+        <section class="platform-empty" id="xWorkspace" hidden>
+          <div class="platform-empty-inner">
+            <div class="platform-empty-icon platform-logo logo-x" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M18.9 1.2h3.7l-8.1 9.2L24 22.8h-7.4l-5.8-7.6-6.6 7.6H.5l8.6-9.8L0 1.2h7.6l5.2 6.9 6.1-6.9Zm-1.3 18.6h2L6.5 3.3H4.3l13.3 16.5Z"></path>
+              </svg>
+            </div>
+            <div class="platform-empty-title">No X actions yet</div>
+            <div class="platform-empty-text">Ready for the X workflow</div>
+          </div>
+        </section>
+      </main>
     </div>
-    <div class="summary" id="summary">Connecting...</div>
-  </header>
-  <main>
-    <section class="workspace-head">
-      <div class="workspace-title">
-        <div class="eyebrow">Dashboard</div>
-        <h2>Actions</h2>
-      </div>
-      <div class="refresh-note" id="refreshNote">Connecting...</div>
-    </section>
-    <div class="grid" id="grid"></div>
-  </main>
+  </div>
   <script>
     const grid = document.getElementById('grid');
     const summary = document.getElementById('summary');
     const refreshNote = document.getElementById('refreshNote');
+    const brandMark = document.getElementById('brandMark');
+    const workspaceName = document.getElementById('workspaceName');
+    const workspaceSub = document.getElementById('workspaceSub');
+    const workspaceEyebrow = document.getElementById('workspaceEyebrow');
+    const workspaceHeading = document.getElementById('workspaceHeading');
+    const xWorkspace = document.getElementById('xWorkspace');
+    const railToggle = document.getElementById('railToggle');
+    const platformTabs = Array.from(document.querySelectorAll('.platform-tab'));
     const cards = new Map();
     const accountStreams = new Map();
     let emptyState = null;
+    const platformConfig = {
+      instagram: {
+        title: 'Instagram Monitor',
+        subtitle: 'Accounts',
+        eyebrow: 'Instagram Dashboard',
+        heading: 'Actions',
+        logoClass: 'logo-instagram'
+      },
+      x: {
+        title: 'X Monitor',
+        subtitle: 'Accounts',
+        eyebrow: 'X Dashboard',
+        heading: 'Actions',
+        logoClass: 'logo-x'
+      }
+    };
+    let activePlatform = 'instagram';
+    try {
+      const storedPlatform = localStorage.getItem('monitorPlatform');
+      if (platformConfig[storedPlatform]) {
+        activePlatform = storedPlatform;
+      }
+    } catch (_error) {
+      activePlatform = 'instagram';
+    }
+    let railCollapsed = false;
+    try {
+      railCollapsed = localStorage.getItem('monitorRailCollapsed') === 'true';
+    } catch (_error) {
+      railCollapsed = false;
+    }
+
+    const setRailCollapsed = collapsed => {
+      railCollapsed = Boolean(collapsed);
+      document.body.classList.toggle('rail-collapsed', railCollapsed);
+      railToggle.setAttribute('aria-expanded', railCollapsed ? 'false' : 'true');
+      railToggle.setAttribute('aria-label', railCollapsed ? 'Expand platform panel' : 'Collapse platform panel');
+      railToggle.title = railCollapsed ? 'Expand panel' : 'Collapse panel';
+      try {
+        localStorage.setItem('monitorRailCollapsed', railCollapsed ? 'true' : 'false');
+      } catch (_error) {}
+    };
+
+    const getPlatformLogoHtml = platform => {
+      const tab = platformTabs.find(item => item.dataset.platform === platform);
+      const logo = tab ? tab.querySelector('.platform-logo') : null;
+      return logo ? logo.innerHTML : '';
+    };
+
+    const updateWorkspaceChrome = platform => {
+      const config = platformConfig[platform] || platformConfig.instagram;
+      workspaceName.textContent = config.title;
+      workspaceSub.textContent = config.subtitle;
+      workspaceEyebrow.textContent = config.eyebrow;
+      workspaceHeading.textContent = config.heading;
+      brandMark.className = 'brand-mark ' + config.logoClass;
+      brandMark.innerHTML = getPlatformLogoHtml(platform);
+      platformTabs.forEach(tab => {
+        const isActive = tab.dataset.platform === platform;
+        tab.classList.toggle('active', isActive);
+        tab.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+    };
 
     const escapeText = value => String(value ?? '').replace(/[&<>"']/g, char => ({
       '&': '&amp;',
@@ -699,16 +1058,17 @@ const getMonitorHtml = () => `<!doctype html>
       const status = String(value || '').toLowerCase();
       if (['done', 'completed', 'commented', 'skipped'].includes(status)) return 'done';
       if (['failed', 'error'].includes(status)) return 'failed';
-      if (['running', 'active', 'working', 'queued', 'navigating', 'loaded', 'liking', 'liked', 'commenting', 'ready', 'login', 'login-needed', 'starting', 'validating-session', 'verification', 'manual-verification', 'paused'].includes(status)) return 'running';
+      if (['running', 'active', 'working', 'queued', 'navigating', 'loaded', 'reposting', 'reposted', 'liking', 'liked', 'commenting', 'ready', 'login', 'login-needed', 'starting', 'validating-session', 'verification', 'manual-verification', 'paused'].includes(status)) return 'running';
       return 'pending';
     };
-    const lifecycleStates = ['queued', 'starting', 'logged_in', 'navigating', 'liked', 'commenting', 'verified', 'done'];
+    const lifecycleStates = ['queued', 'starting', 'logged_in', 'navigating', 'reposted', 'liked', 'commenting', 'verified', 'done'];
     const lifecycleRank = state => {
       const normalized = String(state || '').toLowerCase();
       const alias = {
         ready: 'logged_in',
         login: 'starting',
         loaded: 'navigating',
+        reposting: 'reposted',
         liking: 'liked',
         commented: 'verified',
         completed: 'done',
@@ -733,6 +1093,7 @@ const getMonitorHtml = () => `<!doctype html>
         starting: 'Starting',
         logged_in: 'Logged in',
         navigating: 'Navigating',
+        reposted: 'Reposted',
         liked: 'Liked',
         commenting: 'Commenting',
         verified: 'Verified',
@@ -753,7 +1114,7 @@ const getMonitorHtml = () => `<!doctype html>
       }).join('');
     };
     const isManualPhase = value => ['login-needed', 'verification', 'manual-verification', 'paused'].includes(String(value || '').toLowerCase());
-    const isManualMessage = value => /verification page opened|manual verification|security code|two[- ]factor|confirm it'?s you|suspicious login|verify (your )?(account|identity)|checkpoint|captcha|i'?m not a robot|recaptcha|not logged in|manual instagram login|full experience|tablet app|input\\[name="?email"?\\]/i.test(String(value || ''));
+    const isManualMessage = value => /verification page opened|manual verification|security code|two[- ]factor|confirm it'?s you|suspicious login|verify (your )?(account|identity)|checkpoint|captcha|i'?m not a robot|recaptcha|not logged in|manual instagram login|x login|x verification|full experience|tablet app|input\\[name="?email"?\\]/i.test(String(value || ''));
     const formatTime = value => {
       if (!value) return '';
       const date = new Date(value);
@@ -797,7 +1158,25 @@ const getMonitorHtml = () => `<!doctype html>
       return 'https://www.instagram.com/' + parts.kind + '/' + encodeURIComponent(parts.shortcode) + '/media/?size=l';
     };
     const getEmbedParts = item => getEmbedPartsFromContentKey(item.contentKey) || getEmbedPartsFromUrl(item.url);
+    const getItemPlatform = item => {
+      const value = String(item.platform || '').toLowerCase();
+      if (value === 'x' || String(item.accountKey || '').startsWith('x:') || String(item.contentKey || '').startsWith('x:')) return 'x';
+      return 'instagram';
+    };
+    const getXStatusId = item => {
+      const contentMatch = String(item.contentKey || '').match(/^x:(?:status:)?([^:]+)$/i);
+      if (contentMatch) return contentMatch[1];
+      try {
+        const url = new URL(item.url || '');
+        const parts = url.pathname.split('/').filter(Boolean);
+        const statusIndex = parts.findIndex(part => ['status', 'statuses'].includes(part.toLowerCase()));
+        return statusIndex >= 0 ? parts[statusIndex + 1] : (parts[0] === 'i' && parts[1] === 'status' ? parts[2] : '');
+      } catch (_error) {
+        return '';
+      }
+    };
     const getMediaKindLabel = item => {
+      if (getItemPlatform(item) === 'x') return 'X Post';
       const parts = getEmbedParts(item);
       if (!parts) return 'Post';
       if (parts.kind === 'reel') return 'Reel';
@@ -809,6 +1188,10 @@ const getMonitorHtml = () => `<!doctype html>
       return parts ? parts.shortcode : '';
     };
     const getDisplayTarget = item => {
+      if (getItemPlatform(item) === 'x') {
+        const statusId = getXStatusId(item);
+        return statusId ? 'X post ' + statusId : (item.url || item.contentKey || 'X post not selected');
+      }
       const parts = getEmbedParts(item);
       if (parts) return getMediaKindLabel(item) + ' ' + parts.shortcode;
       return item.contentKey || item.url || 'Post not selected';
@@ -833,11 +1216,12 @@ const getMonitorHtml = () => `<!doctype html>
     const getFallbackHtml = (item, phase) => {
       const kind = getMediaKindLabel(item);
       const account = item.account || item.accountKey || 'default';
+      const platform = getItemPlatform(item);
       const caption = compact(getDisplayTarget(item) || item.scheduledAt || phase || 'Waiting', 'Waiting');
       return '<div class="fallback-card">'
         + '<div class="fallback-type">' + escapeText(kind) + '</div>'
         + '<div class="fallback-center">'
-        + '<div class="fallback-mark">IG</div>'
+        + '<div class="fallback-mark">' + (platform === 'x' ? 'X' : 'IG') + '</div>'
         + '<div class="fallback-title">@' + escapeText(account) + '</div>'
         + '<div class="fallback-caption">' + escapeText(caption) + '</div>'
         + '</div>'
@@ -970,7 +1354,7 @@ const getMonitorHtml = () => `<!doctype html>
       card.className = 'card';
       card.innerHTML = '<div class="card-head">'
         + '<div class="account-wrap"><div class="account"></div><div class="card-sub"></div></div>'
-        + '<div class="card-status"><button class="history-btn" type="button">History</button><span class="queue"></span><span class="pill"></span></div>'
+        + '<div class="card-status"><button class="save-session-btn" type="button" hidden>Save & Continue</button><button class="history-btn" type="button">History</button><span class="queue"></span><span class="pill"></span></div>'
         + '</div>'
         + '<div class="state-panel">'
         + '<div class="state-meta"><span class="state-name"></span><span class="state-time"></span></div>'
@@ -996,6 +1380,7 @@ const getMonitorHtml = () => `<!doctype html>
         card,
         account: card.querySelector('.account'),
         sub: card.querySelector('.card-sub'),
+        saveButton: card.querySelector('.save-session-btn'),
         historyButton: card.querySelector('.history-btn'),
         queue: card.querySelector('.queue'),
         pill: card.querySelector('.pill'),
@@ -1024,6 +1409,7 @@ const getMonitorHtml = () => `<!doctype html>
         lastFrameSrc: null,
         item: null
       };
+      refs.saveButton.addEventListener('click', () => saveXSessionAndContinue(refs));
       refs.historyButton.addEventListener('click', () => toggleHistory(refs));
       refs.closeHistoryButton.addEventListener('click', event => {
         event.stopPropagation();
@@ -1058,6 +1444,51 @@ const getMonitorHtml = () => `<!doctype html>
       refs.liveA.classList.remove('visible');
       refs.liveB.classList.remove('visible');
       refs.card.classList.remove('live');
+    };
+
+    const clearRenderedCards = () => {
+      cards.forEach(refs => {
+        closeStream(refs);
+        refs.card.remove();
+      });
+      cards.clear();
+      hideEmpty();
+    };
+
+    const renderXWorkspace = () => {
+      grid.hidden = false;
+      xWorkspace.hidden = true;
+    };
+
+    const renderInstagramWorkspace = () => {
+      grid.hidden = false;
+      xWorkspace.hidden = true;
+    };
+
+    const setActivePlatform = (platform, options = {}) => {
+      const nextPlatform = platformConfig[platform] ? platform : 'instagram';
+      const changed = activePlatform !== nextPlatform;
+      activePlatform = nextPlatform;
+      try {
+        localStorage.setItem('monitorPlatform', activePlatform);
+      } catch (_error) {}
+      updateWorkspaceChrome(activePlatform);
+
+      if (activePlatform === 'instagram') {
+        renderInstagramWorkspace();
+        if (changed && !options.skipRefresh) {
+          refresh();
+        }
+        return;
+      }
+
+      if (changed) {
+        clearRenderedCards();
+      }
+      renderXWorkspace();
+      if (!options.skipRefresh) {
+        refresh();
+      }
     };
 
     const applyLiveFrame = (refs, frameData, onComplete = () => {}) => {
@@ -1190,7 +1621,7 @@ const getMonitorHtml = () => `<!doctype html>
       const queued = item.session ? Number(item.session.queuedOperations || 0) : 0;
       const targetText = getDisplayTarget(item);
       const mediaKind = getMediaKindLabel(item);
-      const mediaUrl = getInstagramMediaUrl(item);
+      const mediaUrl = getItemPlatform(item) === 'x' ? null : getInstagramMediaUrl(item);
       const accentPair = getAccentPair(item);
       const storedThumbnailUrl = item.thumbnailUrl || null;
       const useStoredThumbnail = status !== 'running' && storedThumbnailUrl;
@@ -1206,6 +1637,9 @@ const getMonitorHtml = () => `<!doctype html>
       refs.pill.textContent = phase;
       refs.queue.textContent = queued ? 'Queue ' + queued : '';
       refs.queue.hidden = !queued;
+      refs.saveButton.hidden = !(getItemPlatform(item) === 'x' && status === 'running' && (item.loginRequired || item.phase === 'login-needed' || isManualMessage(item.error)));
+      refs.saveButton.disabled = false;
+      refs.saveButton.textContent = 'Save & Continue';
       refs.stateName.textContent = getStateTitle(getActionState(item, status, phase));
       refs.stateTime.textContent = formatShortTime(task.updatedAt || item.updatedAt || item.completedAt || '');
       refs.stateSteps.innerHTML = getStateStepsHtml(item, status, phase);
@@ -1282,6 +1716,33 @@ const getMonitorHtml = () => `<!doctype html>
       }
     };
 
+    const saveXSessionAndContinue = async refs => {
+      const item = refs.item || {};
+      refs.saveButton.disabled = true;
+      refs.saveButton.textContent = 'Saving...';
+      try {
+        const response = await fetch('/x/save-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            x_username: item.account || String(item.accountKey || '').replace(/^x:/, ''),
+            row_number: item.rowNumber || null,
+            x_url: item.url || null,
+            comment_text: item.comment || null
+          })
+        });
+        const data = await response.json();
+        if (!data.success) throw new Error(data.message || data.error || 'Could not save session');
+        refs.saveButton.textContent = data.completed ? 'Done' : 'Saved';
+        refresh();
+      } catch (error) {
+        refs.saveButton.disabled = false;
+        refs.saveButton.textContent = 'Close Chrome, Retry';
+        refs.error.textContent = error.message;
+        refs.error.hidden = false;
+      }
+    };
+
     const removeMissingCards = seen => {
       cards.forEach((refs, key) => {
         if (!seen.has(key)) {
@@ -1324,8 +1785,10 @@ const getMonitorHtml = () => `<!doctype html>
     };
 
     async function refresh() {
+      if (activePlatform === 'instagram') renderInstagramWorkspace();
+      else renderXWorkspace();
       try {
-        const response = await fetch('/health', { cache: 'no-store' });
+        const response = await fetch('/health?platform=' + encodeURIComponent(activePlatform), { cache: 'no-store' });
         const data = await response.json();
         const items = mergeDashboardItems(data);
         updateSummary(items);
@@ -1353,6 +1816,20 @@ const getMonitorHtml = () => `<!doctype html>
         listElement.innerHTML = '<div class="history-event"><div class="history-message">No history recorded yet.</div></div>';
         return;
       }
+      const doneEvent = events.find(event => ['done', 'commented', 'completed'].includes(String(event.action || event.status || '').toLowerCase()));
+      if (doneEvent) {
+        const isX = events.some(event => getItemPlatform(event) === 'x');
+        const actionText = events.map(event => String(event.action || event.message || '').toLowerCase()).join(' ');
+        const actions = [];
+        if (isX || /repost/.test(actionText)) actions.push('reposted');
+        if (/lik/.test(actionText) || isX) actions.push('liked');
+        if (/comment|reply/.test(actionText) || doneEvent) actions.push('commented');
+        listElement.innerHTML = '<div class="history-event">'
+          + '<div class="history-top"><div class="history-action">Done</div><div class="history-time">' + escapeText(formatTime(doneEvent.time)) + '</div></div>'
+          + actions.map(action => '<div class="history-message">- ' + escapeText(action) + '</div>').join('')
+          + '</div>';
+        return;
+      }
       listElement.innerHTML = events.map(event => {
         const message = event.error || event.message || '';
         const target = event.contentKey || event.url || '';
@@ -1371,6 +1848,7 @@ const getMonitorHtml = () => `<!doctype html>
       params.set('limit', '20');
       if (item && item.accountKey) params.set('accountKey', item.accountKey);
       if (item && item.contentKey) params.set('contentKey', item.contentKey);
+      params.set('platform', activePlatform);
       refs.historyList.innerHTML = '<div class="history-event"><div class="history-message">Loading...</div></div>';
       try {
         const response = await fetch('/history?' + params.toString(), { cache: 'no-store' });
@@ -1402,7 +1880,19 @@ const getMonitorHtml = () => `<!doctype html>
       }
     });
 
-    refresh();
+    railToggle.addEventListener('click', () => setRailCollapsed(!railCollapsed));
+
+    platformTabs.forEach(tab => {
+      tab.addEventListener('click', () => setActivePlatform(tab.dataset.platform));
+    });
+
+    setRailCollapsed(railCollapsed);
+    setActivePlatform(activePlatform, { skipRefresh: true });
+    if (activePlatform === 'instagram') {
+      refresh();
+    } else {
+      refresh();
+    }
     setInterval(refresh, 1800);
   </script>
 </body>
