@@ -1718,6 +1718,9 @@ const getMonitorHtml = () => `<!doctype html>
 
     const saveXSessionAndContinue = async refs => {
       const item = refs.item || {};
+      const session = item.session || {};
+      const accountKey = session.accountKey || item.accountKey || '';
+      const accountName = String(accountKey || item.account || '').replace(/^x:/, '');
       refs.saveButton.disabled = true;
       refs.saveButton.textContent = 'Saving...';
       try {
@@ -1725,7 +1728,10 @@ const getMonitorHtml = () => `<!doctype html>
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            x_username: item.account || String(item.accountKey || '').replace(/^x:/, ''),
+            x_account_key: accountKey || null,
+            account_key: accountKey || null,
+            x_username: accountName,
+            x_manual_chrome_debug_port: session.manualChromeDebugPort || null,
             row_number: item.rowNumber || null,
             x_url: item.url || null,
             comment_text: item.comment || null

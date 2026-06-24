@@ -3,7 +3,8 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exec } = require('child_process');
+const net = require('net');
+const { exec, execFile, spawn } = require('child_process');
 const { AsyncLocalStorage } = require('async_hooks');
 const { getMonitorHtml } = require('./dashboard');
 
@@ -131,6 +132,9 @@ const BROWSER_WINDOW_HEIGHT = Number(process.env.BROWSER_WINDOW_HEIGHT) || BROWS
 const MANUAL_BROWSER_WINDOW_WIDTH = Number(process.env.MANUAL_BROWSER_WINDOW_WIDTH) || Math.max(1280, BROWSER_WINDOW_WIDTH + 80);
 const MANUAL_BROWSER_WINDOW_HEIGHT = Number(process.env.MANUAL_BROWSER_WINDOW_HEIGHT) || BROWSER_WINDOW_HEIGHT;
 const HIDE_BROWSER_WINDOWS = process.env.HIDE_BROWSER_WINDOWS !== 'false' && !HEADLESS;
+const FOCUS_MANUAL_BROWSER_WINDOW = process.env.FOCUS_MANUAL_BROWSER_WINDOW !== 'false';
+const MAXIMIZE_MANUAL_BROWSER_WINDOW = process.env.MAXIMIZE_MANUAL_BROWSER_WINDOW === 'true';
+const MANUAL_BROWSER_FOCUS_DELAY_MS = Number(process.env.MANUAL_BROWSER_FOCUS_DELAY_MS) || 400;
 const DEFAULT_CHROME_USER_DATA_DIR = process.env.CHROME_USER_DATA_DIR
     || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'User Data');
 const DEFAULT_CHROME_PROFILE_DIRECTORY = process.env.CHROME_PROFILE_DIRECTORY || 'Default';
@@ -149,6 +153,14 @@ const X_USE_SYSTEM_BROWSER_PROFILE = process.env.X_USE_SYSTEM_BROWSER_PROFILE ==
 const X_AUTO_LOGIN = process.env.X_AUTO_LOGIN === 'true';
 const X_MANUAL_CHROME_USER_DATA_DIR = process.env.X_MANUAL_CHROME_USER_DATA_DIR || path.join(__dirname, 'x-manual-chrome-profile');
 const X_MANUAL_CHROME_DEBUG_PORT_BASE = Number(process.env.X_MANUAL_CHROME_DEBUG_PORT_BASE) || 9323;
+const X_MANUAL_CHROME_DEBUG_PORT_RANGE = Math.max(20, Number(process.env.X_MANUAL_CHROME_DEBUG_PORT_RANGE) || 2000);
+const X_MANUAL_CHROME_FRESH_PROFILE = process.env.X_MANUAL_CHROME_FRESH_PROFILE !== 'false';
+const X_SAVE_SESSION_STEP_TIMEOUT_MS = Number(process.env.X_SAVE_SESSION_STEP_TIMEOUT_MS) || 12000;
+const X_SAVE_SESSION_CONNECT_TIMEOUT_MS = Number(process.env.X_SAVE_SESSION_CONNECT_TIMEOUT_MS) || Math.max(30000, X_SAVE_SESSION_STEP_TIMEOUT_MS);
+const X_SAVE_SESSION_SCAN_TIMEOUT_MS = Number(process.env.X_SAVE_SESSION_SCAN_TIMEOUT_MS) || Math.max(20000, X_SAVE_SESSION_STEP_TIMEOUT_MS);
+const X_API_REQUEST_TIMEOUT_MS = Number(process.env.X_API_REQUEST_TIMEOUT_MS) || 30000;
+const X_MANUAL_CHROME_PORT_PROBE_TIMEOUT_MS = Number(process.env.X_MANUAL_CHROME_PORT_PROBE_TIMEOUT_MS) || 120;
+const X_MANUAL_CHROME_DISCOVERY_CONCURRENCY = Math.max(20, Number(process.env.X_MANUAL_CHROME_DISCOVERY_CONCURRENCY) || 120);
 const AUTO_RESUME_AFTER_MANUAL_VERIFICATION = process.env.AUTO_RESUME_AFTER_MANUAL_VERIFICATION !== 'false';
 const DEFAULT_REDIRECT_BROWSING_MS = 65000;
 const MONITOR_STREAM_QUALITY = Number(process.env.MONITOR_STREAM_QUALITY) || 72;
@@ -158,14 +170,31 @@ const MONITOR_STREAM_TARGET_FPS = Number(process.env.MONITOR_STREAM_TARGET_FPS) 
 const MANUAL_VERIFICATION_CHECK_MS = Number(process.env.MANUAL_VERIFICATION_CHECK_MS) || 1500;
 const MANUAL_VERIFICATION_RESUME_DELAY_MS = Number(process.env.MANUAL_VERIFICATION_RESUME_DELAY_MS) || 1500;
 const MANUAL_ACTION_COMPLETION_WAIT_MS = Number(process.env.MANUAL_ACTION_COMPLETION_WAIT_MS) || 110000;
+const X_MANUAL_ACTION_COMPLETION_WAIT_MS = Number(process.env.X_MANUAL_ACTION_COMPLETION_WAIT_MS) || 600000;
 const MANUAL_ACTION_COMPLETION_POLL_MS = Number(process.env.MANUAL_ACTION_COMPLETION_POLL_MS) || 1000;
-const COMMENT_COMPOSER_OPEN_WAIT_MS = Number(process.env.COMMENT_COMPOSER_OPEN_WAIT_MS) || 50000;
+const COMMENT_COMPOSER_OPEN_WAIT_MS = Number(process.env.COMMENT_COMPOSER_OPEN_WAIT_MS) || 10000;
 const COMMENT_COMPOSER_HINT_RETRY_MS = Number(process.env.COMMENT_COMPOSER_HINT_RETRY_MS) || 12000;
+const INSTAGRAM_NAVIGATION_SETTLE_MS = Number(process.env.INSTAGRAM_NAVIGATION_SETTLE_MS) || 3500;
+const INSTAGRAM_TARGET_RELOAD_SETTLE_MS = Number(process.env.INSTAGRAM_TARGET_RELOAD_SETTLE_MS) || 3500;
+const INSTAGRAM_ACTION_READY_WAIT_MS = Number(process.env.INSTAGRAM_ACTION_READY_WAIT_MS) || 1200;
+const INSTAGRAM_COMMENT_RETRY_WAIT_MS = Number(process.env.INSTAGRAM_COMMENT_RETRY_WAIT_MS) || 1200;
+const INSTAGRAM_LIKE_VERIFY_WAIT_MS = Number(process.env.INSTAGRAM_LIKE_VERIFY_WAIT_MS) || 900;
+const INSTAGRAM_LIKE_BUTTON_VERIFY_WAIT_MS = Number(process.env.INSTAGRAM_LIKE_BUTTON_VERIFY_WAIT_MS) || 5000;
+const INSTAGRAM_COMMENT_PREPARE_WAIT_MS = Number(process.env.INSTAGRAM_COMMENT_PREPARE_WAIT_MS) || 1200;
+const INSTAGRAM_COMMENT_PREPARE_RETRY_WAIT_MS = Number(process.env.INSTAGRAM_COMMENT_PREPARE_RETRY_WAIT_MS) || 1800;
+const INSTAGRAM_AFTER_COMMENT_FILL_WAIT_MS = Number(process.env.INSTAGRAM_AFTER_COMMENT_FILL_WAIT_MS) || 500;
 const DASHBOARD_RUNNING_STALE_MS = Number(process.env.DASHBOARD_RUNNING_STALE_MS) || 180000;
 const INDIA_TIME_ZONE = 'Asia/Kolkata';
 const INDIA_UTC_OFFSET_MINUTES = 330;
 const ACTION_HISTORY_MAX_EVENTS = Number(process.env.ACTION_HISTORY_MAX_EVENTS) || 800;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const withTimeout = (promise, timeoutMs, label) => {
+    let timer = null;
+    const timeout = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms.`)), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
 const logDebug = message => {
     if (LOG_DEBUG_DETAILS) {
         console.log(message);
@@ -219,45 +248,326 @@ const openUrlInDefaultBrowser = url => {
     });
 };
 
-const getChromeExecutablePath = () => [
-    process.env.CHROME_EXECUTABLE_PATH,
-    path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
-].filter(Boolean).find(candidate => fs.existsSync(candidate)) || 'chrome';
+const runWindowFocusCommand = (command, args) => new Promise(resolve => {
+    execFile(command, args, { timeout: 1500 }, error => resolve(!error));
+});
 
-const getXManualChromeDebugPort = accountKey => {
-    const hash = safeAccountName(accountKey).split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
-    return X_MANUAL_CHROME_DEBUG_PORT_BASE + (hash % 200);
+const getManualBrowserTitle = session => {
+    const platform = session?.platform === 'x' ? 'X' : 'Instagram';
+    const account = session?.accountName || session?.accountKey || 'account';
+    return `MANUAL ACTION - ${platform} - ${account}`;
 };
 
-const openXManualLoginChrome = session => {
+const markManualBrowserTitle = async session => {
+    if (process.platform !== 'linux' || !session?.page || session.page.isClosed()) {
+        return '';
+    }
+
+    const title = getManualBrowserTitle(session);
+    await session.page.evaluate(nextTitle => {
+        document.title = nextTitle;
+        window.focus();
+    }, title).catch(() => null);
+    return title;
+};
+
+const focusManualBrowserWindow = async titles => {
+    if (!FOCUS_MANUAL_BROWSER_WINDOW || process.platform !== 'linux') {
+        return;
+    }
+
+    await wait(MANUAL_BROWSER_FOCUS_DELAY_MS);
+
+    const candidates = [...new Set((Array.isArray(titles) ? titles : [titles])
+        .map(value => String(value || '').trim())
+        .filter(Boolean))];
+
+    for (const title of candidates) {
+        if (await runWindowFocusCommand('wmctrl', ['-F', '-a', title])) {
+            return;
+        }
+
+        if (await runWindowFocusCommand('wmctrl', ['-a', title])) {
+            return;
+        }
+
+        if (await runWindowFocusCommand('wmctrl', ['-F', '-r', title, '-b', 'add,above'])) {
+            await runWindowFocusCommand('wmctrl', ['-F', '-a', title]);
+            return;
+        }
+
+        if (await runWindowFocusCommand('wmctrl', ['-r', title, '-b', 'add,above'])) {
+            await runWindowFocusCommand('wmctrl', ['-a', title]);
+            return;
+        }
+
+        if (await runWindowFocusCommand('xdotool', ['search', '--name', title, 'windowactivate', '--sync'])) {
+            return;
+        }
+    }
+};
+
+const getPlaywrightChromiumExecutablePath = () => {
+    try {
+        const executablePath = chromium.executablePath();
+        return executablePath && fs.existsSync(executablePath) ? executablePath : null;
+    } catch (_error) {
+        return null;
+    }
+};
+
+const getChromeExecutablePath = () => {
+    const platformCandidates = process.platform === 'linux'
+        ? [
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/snap/bin/chromium',
+            getPlaywrightChromiumExecutablePath(),
+        ]
+        : [
+            path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        ];
+
+    return [
+        process.env.CHROME_EXECUTABLE_PATH,
+        ...platformCandidates,
+    ].filter(Boolean).find(candidate => fs.existsSync(candidate)) || (process.platform === 'linux' ? 'chromium' : 'chrome');
+};
+
+const getXManualChromeDebugPort = (accountKey, offset = 0) => {
+    const hash = safeAccountName(accountKey).split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
+    return X_MANUAL_CHROME_DEBUG_PORT_BASE + ((hash + offset) % X_MANUAL_CHROME_DEBUG_PORT_RANGE);
+};
+
+const getAssignedXManualChromeDebugPort = session => {
+    const assignedPort = Number(session?.manualChromeDebugPort);
+    if (Number.isFinite(assignedPort) && assignedPort > 0) {
+        return assignedPort;
+    }
+    return getXManualChromeDebugPort(session?.accountKey || session?.accountName || 'default');
+};
+
+const isLocalPortOpen = port => new Promise(resolve => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+    const finish = value => {
+        if (settled) {
+            return;
+        }
+        settled = true;
+        socket.destroy();
+        resolve(value);
+    };
+    socket.setTimeout(350);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+});
+
+const probeLocalPortOpen = (port, timeoutMs = X_MANUAL_CHROME_PORT_PROBE_TIMEOUT_MS) => new Promise(resolve => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+    const finish = value => {
+        if (settled) {
+            return;
+        }
+        settled = true;
+        socket.destroy();
+        resolve(value);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+});
+
+const discoverOpenXManualChromeDebugPorts = async () => {
+    const ports = Array.from({ length: X_MANUAL_CHROME_DEBUG_PORT_RANGE }, (_value, index) => X_MANUAL_CHROME_DEBUG_PORT_BASE + index);
+    const openPorts = [];
+    let nextIndex = 0;
+    const workerCount = Math.min(X_MANUAL_CHROME_DISCOVERY_CONCURRENCY, ports.length);
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (nextIndex < ports.length) {
+            const port = ports[nextIndex];
+            nextIndex += 1;
+            if (await probeLocalPortOpen(port)) {
+                openPorts.push(port);
+            }
+        }
+    }));
+    return openPorts.sort((left, right) => left - right);
+};
+
+const getXManualChromePortCandidates = async () => {
+    const knownPorts = Array.from(browserSessions.values())
+        .map(candidateSession => Number(candidateSession.manualChromeDebugPort))
+        .filter(port => Number.isFinite(port) && port > 0);
+    if (knownPorts.length) {
+        return Array.from(new Set(knownPorts));
+    }
+    return discoverOpenXManualChromeDebugPorts();
+};
+
+const getAvailableXManualChromeDebugPort = async session => {
+    const usedPorts = new Set(Array.from(browserSessions.values())
+        .filter(otherSession => otherSession !== session)
+        .map(otherSession => Number(otherSession.manualChromeDebugPort))
+        .filter(port => Number.isFinite(port) && port > 0));
+    const assignedPort = Number(session?.manualChromeDebugPort);
+    if (Number.isFinite(assignedPort) && assignedPort > 0 && !usedPorts.has(assignedPort) && !await isLocalPortOpen(assignedPort)) {
+        return assignedPort;
+    }
+
+    const accountKey = session?.accountKey || session?.accountName || 'default';
+    for (let offset = 0; offset < X_MANUAL_CHROME_DEBUG_PORT_RANGE; offset += 1) {
+        const port = getXManualChromeDebugPort(accountKey, offset);
+        if (!usedPorts.has(port) && !await isLocalPortOpen(port)) {
+            return port;
+        }
+    }
+
+    throw new Error('No available X manual Chrome debug ports. Increase X_MANUAL_CHROME_DEBUG_PORT_RANGE.');
+};
+
+const hasXManualChromeLoginWindow = session => Boolean(
+    session
+    && session.manualChromeDebugPort
+    && isManualVerificationTask(session.currentTask)
+);
+
+const getXManualChromeUserDataDir = session => {
     const accountPart = safeAccountName(session.accountKey || session.accountName || 'default');
-    const userDataDir = path.join(X_MANUAL_CHROME_USER_DATA_DIR, accountPart);
-    const port = getXManualChromeDebugPort(session.accountKey);
+    if (!X_MANUAL_CHROME_FRESH_PROFILE) {
+        return path.join(X_MANUAL_CHROME_USER_DATA_DIR, accountPart);
+    }
+    const suffix = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    return path.join(X_MANUAL_CHROME_USER_DATA_DIR, `${accountPart}-${suffix}`);
+};
+
+const waitForXManualChromeReady = async ({ port, chromeProcess, getLaunchError, getExitInfo, timeoutMs = 10000 }) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        const launchError = getLaunchError();
+        if (launchError) {
+            throw launchError;
+        }
+
+        if (await isLocalPortOpen(port)) {
+            return true;
+        }
+
+        const exitInfo = getExitInfo();
+        if (exitInfo) {
+            throw new Error(`Chrome exited before opening debug port ${port} (${exitInfo}).`);
+        }
+
+        if (chromeProcess.exitCode !== null) {
+            throw new Error(`Chrome exited before opening debug port ${port} (code ${chromeProcess.exitCode}).`);
+        }
+
+        await wait(250);
+    }
+
+    throw new Error(`Chrome did not open debug port ${port} within ${timeoutMs}ms.`);
+};
+
+const openXManualLoginChrome = async session => {
+    const currentPort = Number(session.manualChromeDebugPort);
+    if (Number.isFinite(currentPort) && currentPort > 0 && await isLocalPortOpen(currentPort)) {
+        session.browserVisibleForManualVerification = true;
+        await focusManualBrowserWindow(['X', 'Twitter', 'Log in', 'Chrome', 'Chromium']);
+        console.log(`X login Chrome is already open for ${session.accountName || session.accountKey} on debug port ${currentPort}.`);
+        return { port: currentPort, userDataDir: session.manualChromeUserDataDir || null, alreadyOpen: true };
+    }
+
+    const port = await getAvailableXManualChromeDebugPort(session);
+    const userDataDir = getXManualChromeUserDataDir(session);
     fs.mkdirSync(userDataDir, { recursive: true });
     const chromePath = getChromeExecutablePath();
-    const command = process.platform === 'win32'
-        ? `start "" "${chromePath}" --remote-debugging-port=${port} --user-data-dir="${userDataDir}" --no-first-run "${X_LOGIN_URL}"`
-        : `"${chromePath}" --remote-debugging-port=${port} --user-data-dir="${userDataDir}" --no-first-run "${X_LOGIN_URL}"`;
-    exec(command, error => {
-        if (error) {
-            console.log(`Could not open dedicated Chrome login: ${error.message}`);
-        }
+    const visibleManualCount = Array.from(browserSessions.values())
+        .filter(otherSession => otherSession !== session && otherSession.browserVisibleForManualVerification)
+        .length;
+    const cascadeOffset = (visibleManualCount % 6) * 36;
+    const args = [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${userDataDir}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--new-window',
+        ...(MAXIMIZE_MANUAL_BROWSER_WINDOW ? ['--start-maximized'] : []),
+        `--window-size=${MANUAL_BROWSER_WINDOW_WIDTH},${MANUAL_BROWSER_WINDOW_HEIGHT}`,
+        `--window-position=${32 + cascadeOffset},${32 + cascadeOffset}`,
+        X_LOGIN_URL,
+    ];
+
+    let launchError = null;
+    let exitInfo = null;
+    const chromeProcess = spawn(chromePath, args, {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
     });
+    chromeProcess.on('error', error => {
+        launchError = error;
+        console.log(`Could not open dedicated Chrome login for ${session.accountName || session.accountKey}: ${error.message}`);
+    });
+    chromeProcess.on('exit', (code, signal) => {
+        exitInfo = `code ${code ?? 'null'}, signal ${signal ?? 'null'}`;
+    });
+    chromeProcess.unref();
+    await waitForXManualChromeReady({
+        port,
+        chromeProcess,
+        getLaunchError: () => launchError,
+        getExitInfo: () => exitInfo,
+    });
+    session.manualChromeDebugPort = port;
+    session.manualChromeUserDataDir = userDataDir;
+    session.manualChromeOpenedAt = new Date().toISOString();
+    session.browserVisibleForManualVerification = true;
+    await focusManualBrowserWindow(['X', 'Twitter', 'Log in', 'Chrome', 'Chromium']);
+    console.log(`Opened X login Chrome for ${session.accountName || session.accountKey} on debug port ${port}.`);
     return { port, userDataDir };
 };
 
 const getPayload = req => req.body?.parameters || req.body || {};
-const isPageOpen = () => {
-    const activePage = getActiveBrowserSession().page;
+const isSessionPageOpen = session => {
+    const activePage = session?.page;
     return Boolean(activePage && !activePage.isClosed());
 };
+const isPageOpen = () => {
+    return isSessionPageOpen(getActiveBrowserSession());
+};
+const normalizePayloadFieldName = value => String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
 const getFirstPayloadValue = (payload, names) => {
+    const normalizedEntries = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? Object.entries(payload).map(([key, value]) => [normalizePayloadFieldName(key), value])
+        : [];
+
     for (const name of names) {
-        const value = payload[name];
+        const value = payload?.[name];
         if (value !== undefined && value !== null && String(value).trim() !== '') {
             return value;
+        }
+
+        const normalizedName = normalizePayloadFieldName(name);
+        const normalizedEntry = normalizedEntries.find(([key, entryValue]) => (
+            key === normalizedName
+            && entryValue !== undefined
+            && entryValue !== null
+            && String(entryValue).trim() !== ''
+        ));
+        if (normalizedEntry) {
+            return normalizedEntry[1];
         }
     }
 
@@ -787,6 +1097,62 @@ const getManualActionPhase = taskOrMessage => {
 
 const shouldStoreDashboardStatus = value => ['running', 'done', 'failed'].includes(normalizeDashboardStatus(value));
 
+const SCHEDULE_RELATIVE_FIELD_NAMES = [
+    'wait_before_seconds',
+    'waitBeforeSeconds',
+    'delay_before_seconds',
+    'delayBeforeSeconds',
+    'schedule_delay_seconds',
+    'scheduleDelaySeconds',
+    'start_after_seconds',
+    'startAfterSeconds',
+];
+const SCHEDULE_AT_FIELD_NAMES = [
+    'scheduled_at',
+    'scheduledAt',
+    'schedule_at',
+    'scheduleAt',
+    'run_at',
+    'runAt',
+    'start_at',
+    'startAt',
+    'scheduled_datetime',
+    'scheduledDatetime',
+    'schedule_datetime',
+    'scheduleDatetime',
+    'scheduled_date_time',
+    'scheduledDateTime',
+    'schedule_date_time',
+    'scheduleDateTime',
+    'date_time',
+    'dateTime',
+    'datetime',
+    'scheduled',
+    'schedule',
+];
+const SCHEDULE_DATE_FIELD_NAMES = [
+    'scheduled_date',
+    'scheduledDate',
+    'schedule_date',
+    'scheduleDate',
+    'run_date',
+    'runDate',
+    'start_date',
+    'startDate',
+    'date',
+];
+const SCHEDULE_TIME_FIELD_NAMES = [
+    'scheduled_time',
+    'scheduledTime',
+    'schedule_time',
+    'scheduleTime',
+    'run_time',
+    'runTime',
+    'start_time',
+    'startTime',
+    'time',
+];
+
 const getInstagramUrlFromPayload = payload => getFirstPayloadValue(payload, [
     'url',
     'instagram_url',
@@ -808,11 +1174,45 @@ const getInstagramUrlFromPayload = payload => getFirstPayloadValue(payload, [
 ]) || null;
 
 const getDashboardScheduledValue = payload => {
-    const scheduledAt = getFirstPayloadValue(payload, ['scheduled_at', 'schedule_at', 'run_at', 'start_at']);
-    const scheduledDate = getFirstPayloadValue(payload, ['scheduled_date', 'schedule_date', 'run_date']);
-    const scheduledTime = getFirstPayloadValue(payload, ['scheduled_time', 'schedule_time', 'run_time']);
+    const scheduledAt = getFirstPayloadValue(payload, SCHEDULE_AT_FIELD_NAMES);
+    const scheduledDate = getFirstPayloadValue(payload, SCHEDULE_DATE_FIELD_NAMES);
+    const scheduledTime = getFirstPayloadValue(payload, SCHEDULE_TIME_FIELD_NAMES);
     return scheduledAt || (scheduledDate && scheduledTime ? `${scheduledDate} ${scheduledTime}` : scheduledDate || scheduledTime || null);
 };
+
+const getScheduleFieldsFromPayload = payload => {
+    const relativeSeconds = getFirstPayloadValue(payload, SCHEDULE_RELATIVE_FIELD_NAMES);
+    const scheduledAt = getFirstPayloadValue(payload, SCHEDULE_AT_FIELD_NAMES);
+    const scheduledDate = getFirstPayloadValue(payload, SCHEDULE_DATE_FIELD_NAMES);
+    const scheduledTime = getFirstPayloadValue(payload, SCHEDULE_TIME_FIELD_NAMES);
+
+    return {
+        ...(relativeSeconds ? { wait_before_seconds: relativeSeconds } : {}),
+        ...(scheduledAt ? { scheduled_at: scheduledAt } : {}),
+        ...(scheduledDate ? { scheduled_date: scheduledDate } : {}),
+        ...(scheduledTime ? { scheduled_time: scheduledTime } : {}),
+    };
+};
+
+const applyScheduleFieldsToTask = (task, payload = {}) => {
+    if (!task) {
+        return task;
+    }
+
+    const scheduleFields = getScheduleFieldsFromPayload(payload);
+    Object.entries(scheduleFields).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+            task[key] = value;
+        }
+    });
+
+    task.scheduledAt = getDashboardScheduledValue({ ...task, ...scheduleFields }) || task.scheduledAt || null;
+    return task;
+};
+
+const isTruthySheetRunValue = value => ['yes', 'y', 'true', '1', 'run', 'running', 'start'].includes(
+    String(value || '').trim().toLowerCase(),
+);
 
 const getDashboardPostFromPayload = (payload = {}, defaults = {}) => {
     const platform = getPayloadPlatform(payload, defaults.platform || defaults.sourcePlatform || getItemPlatform(defaults)) || 'instagram';
@@ -829,7 +1229,9 @@ const getDashboardPostFromPayload = (payload = {}, defaults = {}) => {
         || defaults.account,
     );
     const rowNumber = getFirstPayloadValue(payload, ['row_number', 'rowNumber', 'row', 'sheet_row', 'sheetRow', '__row_number']);
-    const status = normalizeDashboardStatus(getFirstPayloadValue(payload, ['action_status', 'dashboard_status', 'status', 'state']) || defaults.status);
+    const statusValue = getFirstPayloadValue(payload, ['action_status', 'dashboard_status', 'status', 'state']);
+    const runValue = getFirstPayloadValue(payload, ['run', 'should_run', 'run_action', 'enabled', 'active']);
+    const status = normalizeDashboardStatus(statusValue || defaults.status || (isTruthySheetRunValue(runValue) ? 'running' : null));
     const phase = defaults.phase || (status === 'running' && defaults.source === 'sheet' ? 'queued' : status);
     const comment = getFirstPayloadValue(payload, ['comment', 'comment_text', 'text', 'message']);
 
@@ -998,8 +1400,8 @@ const replaceDashboardPosts = (posts, options = {}) => {
         if (activePostKey && postKey !== activePostKey && normalizeDashboardStatus(post.status) === 'running') {
             post = {
                 ...post,
-                status: 'pending',
-                phase: 'pending',
+                status: 'running',
+                phase: 'queued',
                 startedAt: null,
             };
         }
@@ -1787,6 +2189,7 @@ const queueActionTask = (session, payload, defaults = {}) => {
     task.contentKey = mergedTarget.contentKey || task.contentKey || null;
     task.rowNumber = mergedTarget.rowNumber || task.rowNumber || null;
     task.comment = mergedTarget.comment || task.comment || null;
+    applyScheduleFieldsToTask(task, { ...payload, ...defaults });
     task.phase = 'queued';
     task.updatedAt = new Date().toISOString();
     task.queueKey = getQueuedTaskKey(task);
@@ -1941,6 +2344,17 @@ const formatIndiaDateTime = date => new Intl.DateTimeFormat('en-IN', {
     hour12: false,
 }).format(date);
 
+const getTodayIndiaDateString = () => {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: INDIA_TIME_ZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).formatToParts(new Date());
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    return `${values.day}-${values.month}-${values.year}`;
+};
+
 const parseFlexibleIndianDateTime = value => {
     const rawValue = String(value || '').trim();
     if (!rawValue) {
@@ -1983,12 +2397,7 @@ const parseFlexibleIndianDateTime = value => {
 };
 
 const getScheduleDelay = payload => {
-    const relativeSeconds = Number(getFirstPayloadValue(payload, [
-        'wait_before_seconds',
-        'delay_before_seconds',
-        'schedule_delay_seconds',
-        'start_after_seconds',
-    ]));
+    const relativeSeconds = Number(getFirstPayloadValue(payload, SCHEDULE_RELATIVE_FIELD_NAMES));
 
     if (Number.isFinite(relativeSeconds) && relativeSeconds > 0) {
         return {
@@ -1999,15 +2408,13 @@ const getScheduleDelay = payload => {
         };
     }
 
-    const scheduledAt = getFirstPayloadValue(payload, [
-        'scheduled_at',
-        'schedule_at',
-        'run_at',
-        'start_at',
-    ]);
-    const scheduledDate = getFirstPayloadValue(payload, ['scheduled_date', 'schedule_date', 'run_date']);
-    const scheduledTime = getFirstPayloadValue(payload, ['scheduled_time', 'schedule_time', 'run_time']);
-    const combinedSchedule = scheduledAt || (scheduledDate && scheduledTime ? `${scheduledDate} ${scheduledTime}` : null);
+    const scheduledAt = getFirstPayloadValue(payload, SCHEDULE_AT_FIELD_NAMES);
+    const scheduledDate = getFirstPayloadValue(payload, SCHEDULE_DATE_FIELD_NAMES);
+    const scheduledTime = getFirstPayloadValue(payload, SCHEDULE_TIME_FIELD_NAMES);
+    const combinedSchedule = scheduledAt
+        || (scheduledDate && scheduledTime ? `${scheduledDate} ${scheduledTime}` : null)
+        || scheduledDate
+        || (scheduledTime ? `${getTodayIndiaDateString()} ${scheduledTime}` : null);
 
     if (!combinedSchedule) {
         return {
@@ -2197,6 +2604,7 @@ const hydrateTaskFromPayload = (session, payload = {}, defaults = {}) => {
     task.contentKey = contentKey || task.contentKey || null;
     task.rowNumber = target.rowNumber || rememberedPost?.rowNumber || task.rowNumber || null;
     task.comment = target.comment || rememberedPost?.comment || task.comment || null;
+    applyScheduleFieldsToTask(task, { ...payload, ...defaults });
     task.updatedAt = new Date().toISOString();
     return task;
 };
@@ -2228,7 +2636,9 @@ const markCurrentTaskPaused = async ({ phase = 'manual-verification', message, b
     activeSession.manualVerificationResolvedAt = null;
 
     if (isPageOpen()) {
-        await showBrowserWindow();
+        await withTimeout(showBrowserWindow(), 4000, 'Showing X browser window').catch(error => {
+            console.log(`Could not show X browser window while pausing ${activeSession.accountName || activeSession.accountKey}: ${error.message}`);
+        });
     }
 
     recordTaskEvent(task, phase, {
@@ -2309,10 +2719,75 @@ const runInBrowserSession = async (session, operation, label = 'operation') => {
     return nextQueue;
 };
 
-const closeBrowser = async ({ preserveTask = false } = {}) => {
-    const activeSession = getActiveBrowserSession();
+const clearXManualChromeState = session => {
+    session.manualChromeDebugPort = null;
+    session.manualChromeUserDataDir = null;
+    session.manualChromeOpenedAt = null;
+};
+
+const closeXManualChromeLoginWindow = async session => {
+    const port = Number(session?.manualChromeDebugPort);
+    if (!Number.isFinite(port) || port <= 0) {
+        return false;
+    }
+
+    let browserRef = null;
+    let cdpSession = null;
+    try {
+        browserRef = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 3000 });
+        const contextRef = browserRef.contexts()[0];
+        if (!contextRef) {
+            return false;
+        }
+        const closePage = contextRef.pages().find(item => !item.isClosed()) || await contextRef.newPage().catch(() => null);
+        if (!closePage) {
+            return false;
+        }
+
+        cdpSession = await contextRef.newCDPSession(closePage).catch(() => null);
+        if (!cdpSession) {
+            return false;
+        }
+
+        await cdpSession.send('Browser.close').catch(error => {
+            console.log(`Manual X Chrome close failed for ${session.accountName || session.accountKey}: ${error.message}`);
+        });
+        await wait(1000);
+        return true;
+    } catch (error) {
+        console.log(`Could not connect to manual X Chrome for ${session.accountName || session.accountKey} on port ${port}: ${error.message}`);
+        return false;
+    } finally {
+        if (cdpSession) {
+            await cdpSession.detach().catch(() => null);
+        }
+        if (browserRef) {
+            await browserRef.close().catch(() => null);
+        }
+        clearXManualChromeState(session);
+        session.browserVisibleForManualVerification = false;
+    }
+};
+
+const closeBrowser = async ({ preserveTask = false, session = null } = {}) => {
+    const activeSession = session || getActiveBrowserSession();
+    const wasConnectedOverCDP = Boolean(activeSession.connectedOverCDP);
     activeSession.intentionalBrowserClose = true;
     try {
+        if (activeSession.connectedOverCDP && activeSession.context) {
+            const closePage = isSessionPageOpen(activeSession)
+                ? activeSession.page
+                : activeSession.context.pages().find(item => !item.isClosed());
+            const cdpSession = closePage
+                ? await activeSession.context.newCDPSession(closePage).catch(() => null)
+                : null;
+            if (cdpSession) {
+                await cdpSession.send('Browser.close').catch(error => {
+                    console.log(`CDP browser close failed for ${activeSession.accountName || activeSession.accountKey}: ${error.message}`);
+                });
+                await wait(1000);
+            }
+        }
         if (activeSession.browser) {
             await activeSession.browser.close().catch(error => {
                 console.log(`Browser close failed for ${activeSession.accountName || activeSession.accountKey}: ${error.message}`);
@@ -2323,12 +2798,20 @@ const closeBrowser = async ({ preserveTask = false } = {}) => {
                 console.log(`Browser context close failed for ${activeSession.accountName || activeSession.accountKey}: ${error.message}`);
             });
             console.log(`Browser context closed for ${activeSession.accountName || activeSession.accountKey}.`);
+        } else if (activeSession.manualChromeDebugPort) {
+            const closed = await closeXManualChromeLoginWindow(activeSession);
+            if (closed) {
+                console.log(`Manual X Chrome closed for ${activeSession.accountName || activeSession.accountKey}.`);
+            }
         }
     } finally {
         activeSession.intentionalBrowserClose = false;
     }
 
     clearBrowserResources(activeSession);
+    if (wasConnectedOverCDP) {
+        clearXManualChromeState(activeSession);
+    }
     if (currentAccountKey === activeSession.accountKey) {
         currentAccountKey = null;
     }
@@ -2344,22 +2827,24 @@ const hasQueuedRunnableAction = session => (session.queuedActionTasks || []).som
 ));
 
 const closeBrowserAfterCompletedTask = async (session, reason = 'completed task') => {
-    if (!isPageOpen()) {
+    const activeSession = session || getActiveBrowserSession();
+    if (!isSessionPageOpen(activeSession) && !activeSession.browser && !activeSession.context) {
         return false;
     }
 
-    if (hasQueuedRunnableAction(session)) {
-        console.log(`Keeping browser open for ${session.accountName || session.accountKey}; queued actions are still waiting after ${reason}.`);
+    if (hasQueuedRunnableAction(activeSession)) {
+        console.log(`Keeping browser open for ${activeSession.accountName || activeSession.accountKey}; queued actions are still waiting after ${reason}.`);
         return false;
     }
 
-    if ((session.pendingOperations || 0) > 1) {
-        console.log(`Keeping browser open for ${session.accountName || session.accountKey}; ${session.pendingOperations - 1} pending operation(s) are still waiting after ${reason}.`);
-        return false;
+    if (activeSession.connectedOverCDP) {
+        console.log(`Closing connected manual browser for ${activeSession.accountName || activeSession.accountKey} after ${reason}.`);
+        await closeBrowser({ preserveTask: true, session: activeSession });
+        return true;
     }
 
-    console.log(`Closing browser for ${session.accountName || session.accountKey} after ${reason}.`);
-    await closeBrowser({ preserveTask: true });
+    console.log(`Closing browser for ${activeSession.accountName || activeSession.accountKey} after ${reason}.`);
+    await closeBrowser({ preserveTask: true, session: activeSession });
     return true;
 };
 
@@ -2374,6 +2859,21 @@ const sendError = (res, error, status = 500) => {
     res.status(status).json({ success: false, error: message });
 };
 
+const hideOtherManualBrowserWindows = async activeSession => {
+    if (!HIDE_BROWSER_WINDOWS || process.platform === 'linux') {
+        return;
+    }
+
+    const otherVisibleSessions = Array.from(browserSessions.values())
+        .filter(session => session !== activeSession && session.browserVisibleForManualVerification);
+
+    for (const session of otherVisibleSessions) {
+        await hideBrowserWindow(session).catch(error => {
+            console.log(`Could not hide other manual browser for ${session.accountName || session.accountKey}: ${error.message}`);
+        });
+    }
+};
+
 const showBrowserWindow = async () => {
     const activeSession = getActiveBrowserSession();
     if (HEADLESS || !activeSession.context || !activeSession.page || activeSession.page.isClosed()) {
@@ -2382,23 +2882,48 @@ const showBrowserWindow = async () => {
 
     let cdpSession = null;
     try {
+        const alreadyVisible = Boolean(activeSession.browserVisibleForManualVerification);
+        if (!alreadyVisible) {
+            await hideOtherManualBrowserWindows(activeSession);
+        }
         await activeSession.page.bringToFront().catch(() => null);
+        const manualTitle = await markManualBrowserTitle(activeSession);
+        const pageTitle = await activeSession.page.title().catch(() => '');
+        const pageUrl = activeSession.page.url();
+        const fallbackTitles = /instagram\.com/i.test(pageUrl)
+            ? ['Instagram', 'Chrome', 'Chromium']
+            : /(^|\/\/)(x\.com|twitter\.com)/i.test(pageUrl)
+                ? ['X', 'Twitter', 'Chrome', 'Chromium']
+                : ['Chrome', 'Chromium'];
         cdpSession = await activeSession.context.newCDPSession(activeSession.page);
         const { windowId } = await cdpSession.send('Browser.getWindowForTarget');
         const visibleManualCount = Array.from(browserSessions.values())
             .filter(session => session !== activeSession && session.browserVisibleForManualVerification)
             .length;
         const cascadeOffset = (visibleManualCount % 4) * 32;
-        await cdpSession.send('Browser.setWindowBounds', {
-            windowId,
-            bounds: {
-                left: 32 + cascadeOffset,
-                top: 32 + cascadeOffset,
-                width: MANUAL_BROWSER_WINDOW_WIDTH,
-                height: MANUAL_BROWSER_WINDOW_HEIGHT,
-                windowState: 'normal',
-            },
-        });
+        if (!alreadyVisible) {
+            await cdpSession.send('Browser.setWindowBounds', {
+                windowId,
+                bounds: { windowState: 'normal' },
+            }).catch(() => null);
+            await cdpSession.send('Browser.setWindowBounds', {
+                windowId,
+                bounds: {
+                    left: 32 + cascadeOffset,
+                    top: 32 + cascadeOffset,
+                    width: MANUAL_BROWSER_WINDOW_WIDTH,
+                    height: MANUAL_BROWSER_WINDOW_HEIGHT,
+                },
+            });
+            if (MAXIMIZE_MANUAL_BROWSER_WINDOW) {
+                await cdpSession.send('Browser.setWindowBounds', {
+                    windowId,
+                    bounds: { windowState: 'maximized' },
+                }).catch(() => null);
+            }
+        }
+        await activeSession.page.bringToFront().catch(() => null);
+        await focusManualBrowserWindow([manualTitle, pageTitle, ...fallbackTitles]);
         activeSession.browserVisibleForManualVerification = true;
     } catch (error) {
         console.log(`Could not show browser window: ${error.message}`);
@@ -2409,8 +2934,8 @@ const showBrowserWindow = async () => {
     }
 };
 
-const hideBrowserWindow = async () => {
-    const activeSession = getActiveBrowserSession();
+const hideBrowserWindow = async (session = null) => {
+    const activeSession = session || getActiveBrowserSession();
     if (!HIDE_BROWSER_WINDOWS || !activeSession.context || !activeSession.page || activeSession.page.isClosed()) {
         return;
     }
@@ -2429,6 +2954,10 @@ const hideBrowserWindow = async () => {
                 windowState: 'normal',
             },
         });
+        await cdpSession.send('Browser.setWindowBounds', {
+            windowId,
+            bounds: { windowState: 'minimized' },
+        }).catch(() => null);
         activeSession.browserVisibleForManualVerification = false;
     } catch (error) {
         console.log(`Could not hide browser window: ${error.message}`);
@@ -2440,10 +2969,15 @@ const hideBrowserWindow = async () => {
 };
 
 const clearBrowserResources = session => {
+    const wasConnectedOverCDP = Boolean(session.connectedOverCDP);
     session.browser = null;
     session.context = null;
     session.page = null;
+    session.connectedOverCDP = false;
     session.browserVisibleForManualVerification = false;
+    if (wasConnectedOverCDP) {
+        clearXManualChromeState(session);
+    }
 };
 
 const recordUnexpectedBrowserClose = (session, reason) => {
@@ -2580,6 +3114,7 @@ const launchBrowser = async (storageState, options = {}) => {
         });
         activeSession.browser = activeSession.context.browser();
         activeSession.usesSystemBrowserProfile = true;
+        activeSession.connectedOverCDP = false;
         activeSession.systemBrowserChannel = browserChannel;
         activeSession.systemBrowserName = browserName;
         activeSession.systemUserDataDir = userDataDir;
@@ -2595,6 +3130,7 @@ const launchBrowser = async (storageState, options = {}) => {
             viewport: BROWSER_VIEWPORT,
         });
         activeSession.usesSystemBrowserProfile = false;
+        activeSession.connectedOverCDP = false;
         activeSession.systemBrowserChannel = null;
         activeSession.systemBrowserName = null;
         activeSession.systemUserDataDir = null;
@@ -4161,7 +4697,7 @@ const submitCredentialsOnAnyLoginSurface = async ({ accountName, password, stage
 
 const confirmCredentialLoginCompleted = async ({ accountName, stage = 'login' }) => {
     await page.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => null);
-    await wait(8000);
+    await wait(INSTAGRAM_NAVIGATION_SETTLE_MS);
     await dismissInstagramDialogs();
 
     const blocker = await getInstagramBlocker();
@@ -4220,7 +4756,24 @@ const submitCredentialsAndConfirmLogin = async ({ accountName, password, stage =
 };
 
 const saveSession = async sessionFile => {
-    const sessionData = await context.storageState();
+    let sessionData = null;
+    try {
+        sessionData = await withTimeout(context.storageState(), X_SAVE_SESSION_STEP_TIMEOUT_MS, 'Saving browser session state');
+    } catch (error) {
+        console.log(`storageState failed, saving cookies/localStorage fallback: ${error.message}`);
+        const cookies = await withTimeout(context.cookies(), X_SAVE_SESSION_STEP_TIMEOUT_MS, 'Saving browser cookies');
+        const origins = [];
+        if (isPageOpen()) {
+            const originState = await withTimeout(page.evaluate(() => ({
+                origin: window.location.origin,
+                localStorage: Object.entries(window.localStorage || {}).map(([name, value]) => ({ name, value })),
+            })).catch(() => null), X_SAVE_SESSION_STEP_TIMEOUT_MS, 'Saving browser localStorage');
+            if (originState?.origin && /^https?:\/\//i.test(originState.origin)) {
+                origins.push(originState);
+            }
+        }
+        sessionData = { cookies, origins };
+    }
     fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
     fs.writeFileSync(sessionFile, JSON.stringify(sessionData, null, 2));
 };
@@ -4321,7 +4874,7 @@ const loginCurrentBrowserAndSaveSession = async ({ session, password, stage = 'l
     if (targetUrl) {
         console.log(`Returning ${session.accountName || session.accountKey} to target after login: ${targetUrl}`);
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await wait(6500);
+        await wait(INSTAGRAM_NAVIGATION_SETTLE_MS);
         await dismissInstagramDialogs();
         await throwIfInstagramBlocked(`${stage} target reload`);
     }
@@ -4652,7 +5205,7 @@ const openCommentComposer = async () => {
             );
         }
 
-        await wait(2500);
+        await wait(INSTAGRAM_ACTION_READY_WAIT_MS);
         await dismissInstagramDialogs();
         const closedMessagesPanel = await closeMessagesPanelIfOpen();
         if (closedMessagesPanel) {
@@ -4660,7 +5213,7 @@ const openCommentComposer = async () => {
             continue;
         }
 
-        const waitMs = Math.max(COMMENT_COMPOSER_OPEN_WAIT_MS, 50000);
+        const waitMs = Math.max(1000, COMMENT_COMPOSER_OPEN_WAIT_MS);
         const hintRetryMs = Math.min(COMMENT_COMPOSER_HINT_RETRY_MS, waitMs);
         const waitStartedAt = Date.now();
         const composer = await waitForCommentComposer(waitMs, { returnHintAfterMs: hintRetryMs });
@@ -4674,7 +5227,7 @@ const openCommentComposer = async () => {
         }
         console.log(`Comment panel/input still not ready for ${activeTask?.accountName || activeTask?.accountKey || 'account'} after ${waitedMs}ms on attempt ${attempt}.`);
         await closeCommentPanelIfOpen();
-        await wait(1800);
+        await wait(INSTAGRAM_COMMENT_RETRY_WAIT_MS);
     }
 
     throw new Error(`Comment panel/input did not appear after clicking Comment. Last button: ${JSON.stringify(lastCommentButton)}`);
@@ -5062,7 +5615,7 @@ const fillVisibleCommentInput = async comment => {
         await page.keyboard.press('Control+A');
         await page.keyboard.press('Delete');
         await page.keyboard.insertText(comment);
-        await wait(1000);
+        await wait(INSTAGRAM_AFTER_COMMENT_FILL_WAIT_MS);
 
         value = await getVisibleCommentComposerValue();
         logDebug(`Visible comment input value after direct fill: "${value}"`);
@@ -5107,7 +5660,7 @@ const fillActiveCommentBox = async comment => {
 
         await clearPageTextSelection();
         const domFillResult = await setCommentComposerValue(comment);
-        await wait(1000);
+        await wait(INSTAGRAM_AFTER_COMMENT_FILL_WAIT_MS);
         await clearPageTextSelection();
         lastValue = await getVisibleCommentComposerValue();
         logDebug(`Visible comment box value after DOM fill attempt ${attempt}: "${lastValue}". DOM result: ${JSON.stringify(domFillResult)}`);
@@ -5670,7 +6223,7 @@ const waitForPostActionButton = async (label, timeoutMs = 12000) => {
 };
 
 const verifyLikedOrContinue = async (session, task, stage = 'like') => {
-    const verifiedUnlike = await waitForPostActionButton('Unlike', 14000);
+    const verifiedUnlike = await waitForPostActionButton('Unlike', INSTAGRAM_LIKE_BUTTON_VERIFY_WAIT_MS);
     if (verifiedUnlike) {
         if (task) {
             task.likeButtonRect = verifiedUnlike.clickRect;
@@ -5921,7 +6474,7 @@ const ensureTaskTargetPage = async (task, stage = 'action') => {
     if (targetUrl && (isWrongInstagramSurface || (targetContentKey && currentContentKey && currentContentKey !== targetContentKey))) {
         console.log(`Returning ${task.accountName || task.accountKey} to target before ${stage}: ${targetUrl}`);
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await wait(6500);
+        await wait(INSTAGRAM_TARGET_RELOAD_SETTLE_MS);
         await dismissInstagramDialogs();
         await throwIfInstagramBlocked(stage);
         task.finalUrl = page.url();
@@ -5963,7 +6516,7 @@ const reloadTaskTargetPage = async (task, stage = 'comment retry') => {
 
     console.log(`Reloading target before ${stage}: ${targetUrl}`);
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await wait(7000);
+    await wait(INSTAGRAM_TARGET_RELOAD_SETTLE_MS);
     await dismissInstagramDialogs();
     await throwIfInstagramBlocked(stage);
     task.finalUrl = page.url();
@@ -5980,7 +6533,7 @@ const submitCommentForActiveTask = async (session, comment, stageLabel = 'commen
     for (let attempt = 1; attempt <= 3; attempt += 1) {
         try {
             await ensureTaskTargetPage(task, `${stageLabel} attempt ${attempt}`);
-            await wait(attempt === 1 ? 3000 : 4500);
+            await wait(attempt === 1 ? INSTAGRAM_COMMENT_PREPARE_WAIT_MS : INSTAGRAM_COMMENT_PREPARE_RETRY_WAIT_MS);
             await dismissInstagramDialogs();
             await throwIfInstagramBlocked(stageLabel);
             await throwIfInstagramLoginRequired(`${stageLabel} login`, {
@@ -6023,7 +6576,7 @@ const submitCommentForActiveTask = async (session, comment, stageLabel = 'commen
 
             await fillActiveCommentBox(comment);
             console.log(`Filled ${stageLabel} box for ${session.accountName}.`);
-            await wait(1000);
+            await wait(INSTAGRAM_AFTER_COMMENT_FILL_WAIT_MS);
             const exactCommentBeforePost = await resetCommentComposerIfNotExact(comment);
             if (!exactCommentBeforePost.exact) {
                 throw new Error(`Comment composer was not exact before posting. Expected "${comment}", saw "${exactCommentBeforePost.value}".`);
@@ -6043,7 +6596,7 @@ const submitCommentForActiveTask = async (session, comment, stageLabel = 'commen
                     await closeCommentPanelIfOpen();
                     await closeMessagesPanelIfOpen();
                     await clearPageTextSelection();
-                    await wait(1800);
+                    await wait(INSTAGRAM_COMMENT_RETRY_WAIT_MS);
                     continue;
                 }
 
@@ -6075,6 +6628,8 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
     if (completedBefore) {
         return completedBefore;
     }
+
+    await waitForSchedule(queuedTask, `Instagram queued row ${queuedTask.rowNumber || requestedContentKey || url}`);
 
     const now = new Date().toISOString();
     setActiveTask({
@@ -6110,14 +6665,14 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
     console.log(`Processing queued target for ${session.accountName}: ${url}`);
     await dismissInstagramDialogs();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await wait(8000);
+    await wait(INSTAGRAM_NAVIGATION_SETTLE_MS);
     await dismissInstagramDialogs();
     await throwIfInstagramBlocked('queued navigation');
     await throwIfInstagramLoginRequired('queued navigation login', {
         session,
         targetUrl: url,
     });
-    await wait(1000);
+    await wait(500);
 
     const finalUrl = page.url();
     const finalContentKey = getInstagramContentKey(finalUrl) || requestedContentKey;
@@ -6155,7 +6710,7 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
     task.updatedAt = new Date().toISOString();
     recordTaskEvent(task, 'liking', { status: 'running' });
     await ensureTaskTargetPage(task, 'queued like');
-    await wait(3000);
+    await wait(INSTAGRAM_ACTION_READY_WAIT_MS);
     await dismissInstagramDialogs();
     await throwIfInstagramBlocked('queued like');
     await throwIfInstagramLoginRequired('queued like login', {
@@ -6180,7 +6735,7 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
             }
         }
 
-        await wait(2000);
+        await wait(INSTAGRAM_LIKE_VERIFY_WAIT_MS);
         await dismissInstagramDialogs();
         await throwIfInstagramBlocked('queued like verification');
         const recoveredLoginAfterQueuedLike = await throwIfInstagramLoginRequired('queued like verification login', {
@@ -6200,7 +6755,7 @@ const performQueuedActionTask = async (session, queuedTask, comment) => {
                     await page.click('body', { clickCount: 2 });
                 }
             }
-            await wait(2000);
+            await wait(INSTAGRAM_LIKE_VERIFY_WAIT_MS);
             await dismissInstagramDialogs();
             await throwIfInstagramBlocked('queued like retry verification');
         }
@@ -6339,6 +6894,75 @@ const getVerifiedCompletionForTask = (session, task) => {
         if (completedAction) {
             return completedAction;
         }
+    }
+
+    return null;
+};
+
+const getXTaskCompletionContentKeys = (task, fallbackTarget = {}) => {
+    return Array.from(new Set([
+        task?.contentKey,
+        task?.requestedContentKey,
+        getXContentKey(task?.finalUrl),
+        getXContentKey(task?.originalUrl),
+        fallbackTarget?.contentKey,
+        getXContentKey(fallbackTarget?.url),
+    ].filter(Boolean)));
+};
+
+const getVerifiedXCompletionForTask = (session, task, fallbackTarget = {}) => {
+    if (isTrustedCompletedAction(task?.completedAction)) {
+        return task.completedAction;
+    }
+
+    for (const contentKey of getXTaskCompletionContentKeys(task, fallbackTarget)) {
+        const completedAction = getCompletedAction(session.accountKey, contentKey);
+        if (completedAction && getItemPlatform(completedAction) === 'x') {
+            return completedAction;
+        }
+    }
+
+    const rowNumber = task?.rowNumber || fallbackTarget?.rowNumber || null;
+    if (rowNumber) {
+        const history = readActionHistory();
+        return Object.values(history.completed || {}).find(action => (
+            isTrustedCompletedAction(action)
+            && getItemPlatform(action) === 'x'
+            && normalizeAccountName(action.accountKey || getPlatformAccountKey('x', action.account)) === session.accountKey
+            && String(action.rowNumber || '') === String(rowNumber)
+        )) || null;
+    }
+
+    return null;
+};
+
+const withXSheetTargetFallback = (completedAction, task, fallbackTarget = {}) => {
+    if (!completedAction) {
+        return null;
+    }
+
+    const rowNumber = completedAction.rowNumber || task?.rowNumber || fallbackTarget?.rowNumber || null;
+    const contentKey = completedAction.contentKey || task?.contentKey || task?.requestedContentKey || fallbackTarget?.contentKey || getXContentKey(fallbackTarget?.url);
+    return {
+        ...completedAction,
+        ...(rowNumber ? { rowNumber } : {}),
+        ...(contentKey ? { contentKey } : {}),
+    };
+};
+
+const waitForXManualActionCompletion = async (session, actionTask, fallbackTarget = {}) => {
+    const startedAt = Date.now();
+    let trackedTask = actionTask || session.currentTask || null;
+
+    while (Date.now() - startedAt < X_MANUAL_ACTION_COMPLETION_WAIT_MS) {
+        const completedAction = getVerifiedXCompletionForTask(session, trackedTask, fallbackTarget)
+            || getVerifiedXCompletionForTask(session, session.currentTask, fallbackTarget);
+        if (completedAction) {
+            return withXSheetTargetFallback(completedAction, trackedTask || session.currentTask, fallbackTarget);
+        }
+
+        trackedTask = actionTask || session.currentTask || trackedTask;
+        await wait(MANUAL_ACTION_COMPLETION_POLL_MS);
     }
 
     return null;
@@ -6562,14 +7186,27 @@ const xApiRequest = async ({ method = 'GET', path: apiPath, token, body = null }
     if (typeof fetch !== 'function') {
         throw new Error('This Node.js version does not provide fetch; upgrade Node.js or use browser X mode.');
     }
-    const response = await fetch(`https://api.x.com${apiPath}`, {
-        method,
-        headers: {
-            Authorization: `Bearer ${token}`,
-            ...(body ? { 'Content-Type': 'application/json' } : {}),
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-    });
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), X_API_REQUEST_TIMEOUT_MS);
+    let response = null;
+    try {
+        response = await fetch(`https://api.x.com${apiPath}`, {
+            method,
+            headers: {
+                Authorization: `Bearer ${token}`,
+                ...(body ? { 'Content-Type': 'application/json' } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+            signal: abortController.signal,
+        });
+    } catch (error) {
+        if (error?.name === 'AbortError') {
+            throw new Error(`X API ${method} ${apiPath} timed out after ${X_API_REQUEST_TIMEOUT_MS}ms.`);
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
     const responseText = await response.text();
     let data = null;
     try {
@@ -6690,6 +7327,13 @@ const performXApiAction = async ({ session, payload, target, task }) => {
 };
 
 const getXSessionForRequestPayload = payload => {
+    const requestedAccountKey = String(
+        payload.x_account_key
+        || payload.xAccountKey
+        || payload.account_key
+        || payload.accountKey
+        || '',
+    ).trim();
     const loginIdentifier = String(
         payload.x_username
         || payload.twitter_username
@@ -6699,12 +7343,22 @@ const getXSessionForRequestPayload = payload => {
         || '',
     ).trim();
     const accountName = normalizeAccountName(
-        loginIdentifier
+        stripPlatformAccountKey(requestedAccountKey)
+        || loginIdentifier
         || 'default',
     );
-    const accountKey = getPlatformAccountKey('x', accountName);
+    const accountKey = getPlatformAccountKey('x', requestedAccountKey || accountName);
     const session = getBrowserSession(accountKey, accountName || stripPlatformAccountKey(accountKey), 'x');
     session.xLoginIdentifier = loginIdentifier || accountName || stripPlatformAccountKey(accountKey);
+    const requestedManualChromeDebugPort = Number(
+        payload.x_manual_chrome_debug_port
+        || payload.xManualChromeDebugPort
+        || payload.manual_chrome_debug_port
+        || payload.manualChromeDebugPort,
+    );
+    if (Number.isFinite(requestedManualChromeDebugPort) && requestedManualChromeDebugPort > 0) {
+        session.manualChromeDebugPort = requestedManualChromeDebugPort;
+    }
     session.systemBrowserChannel = payload.browserChannel
         || payload.browser_channel
         || payload.x_browser_channel
@@ -6772,6 +7426,10 @@ const importXSessionFromBrowserProfile = async ({
         const loginText = await browserPage.locator('body').innerText({ timeout: 3000 }).catch(() => '');
         if (!loggedIn || /log in|sign up|temporarily limited your login/i.test(loginText)) {
             throw new Error(`${browserName} profile "${finalProfileDirectory}" is not currently logged into X, or X is still showing a login/limit page.`);
+        }
+        const mismatch = await getXLoggedInAccountMismatch(session, browserPage);
+        if (mismatch) {
+            throw new Error(`${browserName} profile "${finalProfileDirectory}" is logged in as ${mismatch.actual ? `@${mismatch.actual}` : 'an unknown account'}, not @${mismatch.expected}.`);
         }
 
         const sessionFile = getXSessionFileForAccountKey(session.accountKey);
@@ -6921,26 +7579,13 @@ const clickXModalActionButton = async () => {
 };
 
 const dismissXDialogs = async () => {
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-        const clicked = await clickXModalActionButton() || await clickFirstVisibleButton([
-            /^not now$/i,
-            /^maybe later$/i,
-            /^skip$/i,
-            /^got it$/i,
-            /^continue$/i,
-            /^ok$/i,
-            /^done$/i,
-            /^confirm$/i,
-            /^accept all cookies$/i,
-            /^refuse non-essential cookies$/i,
-            /^allow all cookies$/i,
-            /^close$/i,
-        ]);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        const clicked = await clickXModalActionButton();
 
         if (!clicked) {
             return;
         }
-        await wait(900);
+        await wait(500);
     }
 };
 
@@ -6989,6 +7634,61 @@ const isXLoggedIn = async () => {
     const bodyText = await page.locator('body').innerText({ timeout: 2500 }).catch(() => '');
     return /\/home(?:$|[?#])/i.test(url)
         && /Home Timeline|For you\s+Following|What.?s happening\?|Post Your Home Timeline/i.test(bodyText);
+};
+
+const getXLoggedInUsername = async (pageRef = page) => {
+    const rawText = await pageRef.locator('[data-testid="SideNav_AccountSwitcher_Button"]').first()
+        .innerText({ timeout: 2500 })
+        .catch(() => '');
+    const match = rawText.match(/@([a-zA-Z0-9_]{1,15})/);
+    return match ? normalizeAccountName(match[1]) : null;
+};
+
+const isXLoggedInFast = async (pageRef = page) => {
+    if (await getXLoggedInUsername(pageRef)) {
+        return true;
+    }
+    return pageRef.locator([
+        '[data-testid="AppTabBar_Home_Link"]',
+        'a[href="/home"]',
+        '[aria-label="Timeline: Your Home Timeline"]',
+        '[aria-label*="Home timeline" i]',
+    ].join(', ')).first().isVisible({ timeout: 3000 }).catch(() => false);
+};
+
+const getExpectedXUsername = session => {
+    const expected = normalizeAccountName(session?.accountName || stripPlatformAccountKey(session?.accountKey));
+    return expected && expected !== 'default' ? expected : null;
+};
+
+const getXLoggedInAccountMismatch = async (session, pageRef = page) => {
+    const expected = getExpectedXUsername(session);
+    if (!expected) {
+        return null;
+    }
+
+    const actual = await getXLoggedInUsername(pageRef);
+    return actual === expected ? null : { expected, actual };
+};
+
+const validateXLoggedInAccountForSave = async ({ session, payload, stage }) => {
+    const mismatch = await getXLoggedInAccountMismatch(session);
+    if (!mismatch) {
+        return { ok: true };
+    }
+
+    const message = mismatch.actual
+        ? `Wrong X account in this Chrome. Expected @${mismatch.expected}, but it is logged in as @${mismatch.actual}. Switch/login to @${mismatch.expected}, then click Save & Continue again.`
+        : `Could not confirm the logged-in X account. Make sure this Chrome is logged in as @${mismatch.expected}, then click Save & Continue again.`;
+    const task = await markXTaskPaused({
+        phase: 'login-needed',
+        message,
+        loginRequired: true,
+        payload,
+        session,
+        stage,
+    });
+    return { ok: false, task };
 };
 
 const fillXInput = async (selectors, value, label) => {
@@ -7848,19 +8548,32 @@ const submitXCredentialsAndConfirmLogin = async ({ accountName, password, stage 
     throw createAutomaticLoginFailureError(`Automatic X login failed for "${accountName}": ${lastError?.message || 'unknown error'}`);
 };
 
-const startXWithSavedSession = async (sessionFile, targetUrl = X_HOME_URL) => {
+const startXWithSavedSession = async (session, sessionFile, targetUrl = X_HOME_URL) => {
     const sessionData = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
     await launchBrowser(sessionData);
     await page.goto(targetUrl || X_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
     await wait(3500);
     await dismissXDialogs();
-    return isXLoggedIn();
+    if (!await isXLoggedIn()) {
+        return false;
+    }
+    const mismatch = await getXLoggedInAccountMismatch(session);
+    if (mismatch) {
+        console.log(`Saved X session mismatch for ${session.accountName || session.accountKey}: expected @${mismatch.expected}, got ${mismatch.actual ? `@${mismatch.actual}` : 'unknown account'}. Removing bad session file.`);
+        try {
+            fs.unlinkSync(sessionFile);
+        } catch (_error) {
+            // If removal fails, validation still prevents using this session.
+        }
+        return false;
+    }
+    return true;
 };
 
 const connectToXManualChromeSession = async session => {
-    const port = getXManualChromeDebugPort(session.accountKey);
+    const port = getAssignedXManualChromeDebugPort(session);
     const activeSession = getActiveBrowserSession();
-    const browserRef = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+    const browserRef = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: X_SAVE_SESSION_CONNECT_TIMEOUT_MS });
     const contextRef = browserRef.contexts()[0];
     if (!contextRef) {
         await browserRef.close().catch(() => null);
@@ -7878,16 +8591,111 @@ const connectToXManualChromeSession = async session => {
     activeSession.context = contextRef;
     activeSession.page = pageRef;
     activeSession.usesSystemBrowserProfile = false;
+    activeSession.connectedOverCDP = true;
+    activeSession.manualChromeDebugPort = port;
+    activeSession.browserVisibleForManualVerification = true;
     installBrowserLifecycleHandlers(activeSession);
     currentAccountKey = session.accountKey;
     if (!/x\.com/i.test(pageRef.url())) {
         await pageRef.goto(X_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
     }
-    await dismissXDialogs();
-    return isXLoggedIn();
+    return isXLoggedInFast(pageRef);
+};
+
+const getXManualChromePageForPort = async port => {
+    const browserRef = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: Math.min(7000, X_SAVE_SESSION_CONNECT_TIMEOUT_MS) });
+    const contextRef = browserRef.contexts()[0];
+    if (!contextRef) {
+        await browserRef.close().catch(() => null);
+        return null;
+    }
+    const pages = contextRef.pages();
+    const pageRef = pages.find(item => {
+        try {
+            return /(^|\.)x\.com$/i.test(new URL(item.url()).hostname);
+        } catch (_error) {
+            return false;
+        }
+    }) || pages[0] || await contextRef.newPage();
+    return { browserRef, contextRef, pageRef };
+};
+
+const findXManualChromePortForExpectedAccount = async session => {
+    const expected = getExpectedXUsername(session);
+    if (!expected) {
+        return null;
+    }
+    const candidates = await getXManualChromePortCandidates();
+
+    for (const port of candidates) {
+        let connection = null;
+        try {
+            connection = await getXManualChromePageForPort(port);
+            if (!connection?.pageRef) {
+                continue;
+            }
+            const username = await getXLoggedInUsername(connection.pageRef);
+            if (username === expected) {
+                return port;
+            }
+        } catch (_error) {
+            // Ignore closed/stale debug ports while searching.
+        } finally {
+            if (connection?.browserRef) {
+                await connection.browserRef.close().catch(() => null);
+            }
+        }
+    }
+    return null;
+};
+
+const connectToCorrectXManualChromeSession = async session => {
+    const expectedPort = await findXManualChromePortForExpectedAccount(session);
+    if (expectedPort && expectedPort !== Number(session.manualChromeDebugPort)) {
+        console.log(`Correcting X manual Chrome port for ${session.accountName || session.accountKey}: ${session.manualChromeDebugPort} -> ${expectedPort}.`);
+        session.manualChromeDebugPort = expectedPort;
+    }
+    return connectToXManualChromeSession(session);
+};
+
+const disconnectBrowserConnectionOnly = async session => {
+    const manualChromeDebugPort = session.manualChromeDebugPort;
+    const manualChromeUserDataDir = session.manualChromeUserDataDir;
+    const manualChromeOpenedAt = session.manualChromeOpenedAt;
+    clearBrowserResources(session);
+    session.manualChromeDebugPort = manualChromeDebugPort;
+    session.manualChromeUserDataDir = manualChromeUserDataDir;
+    session.manualChromeOpenedAt = manualChromeOpenedAt;
+};
+
+const switchXManualChromeSessionToExpectedAccount = async session => {
+    const expectedPort = await findXManualChromePortForExpectedAccount(session);
+    const currentPort = Number(session.manualChromeDebugPort);
+    if (!expectedPort || expectedPort === currentPort) {
+        return false;
+    }
+
+    const ownerSession = Array.from(browserSessions.values())
+        .find(candidateSession => candidateSession !== session && Number(candidateSession.manualChromeDebugPort) === expectedPort);
+    const oldUserDataDir = session.manualChromeUserDataDir;
+    const ownerUserDataDir = ownerSession?.manualChromeUserDataDir || null;
+    if (ownerSession) {
+        ownerSession.manualChromeDebugPort = currentPort || ownerSession.manualChromeDebugPort;
+        ownerSession.manualChromeUserDataDir = oldUserDataDir || ownerSession.manualChromeUserDataDir;
+    }
+
+    if (session.browser || session.context || isSessionPageOpen(session)) {
+        await disconnectBrowserConnectionOnly(session);
+    }
+    session.manualChromeDebugPort = expectedPort;
+    session.manualChromeUserDataDir = ownerUserDataDir || session.manualChromeUserDataDir;
+    session.browserVisibleForManualVerification = true;
+    console.log(`Switched ${session.accountName || session.accountKey} to matching X Chrome port ${expectedPort}.`);
+    return true;
 };
 
 const startXWithSystemBrowserProfile = async ({
+    session,
     targetUrl = X_HOME_URL,
     browserChannel = X_SYSTEM_BROWSER_CHANNEL,
     userDataDir = null,
@@ -7905,7 +8713,15 @@ const startXWithSystemBrowserProfile = async ({
     await wait(4000);
     await dismissXDialogs();
     await throwIfXBlocked('x chrome profile');
-    return isXLoggedIn();
+    if (!await isXLoggedIn()) {
+        return false;
+    }
+    const mismatch = await getXLoggedInAccountMismatch(session);
+    if (mismatch) {
+        console.log(`X browser profile mismatch for ${session.accountName || session.accountKey}: expected @${mismatch.expected}, got ${mismatch.actual ? `@${mismatch.actual}` : 'unknown account'}.`);
+        return false;
+    }
+    return true;
 };
 
 const ensureXTargetPostLoaded = async (target, stage = 'x navigation') => {
@@ -7947,12 +8763,37 @@ const loginXAndSaveSession = async ({ session, password, targetUrl = X_HOME_URL,
         password,
         stage,
     });
+    const mismatch = await getXLoggedInAccountMismatch(session);
+    if (mismatch) {
+        throw new Error(`Automatic X login reached the wrong account. Expected @${mismatch.expected}, got ${mismatch.actual ? `@${mismatch.actual}` : 'unknown account'}.`);
+    }
     await saveSession(getXSessionFileForAccountKey(session.accountKey));
     if (targetUrl) {
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
         await wait(3500);
         await dismissXDialogs();
     }
+};
+
+const hideXBrowserAfterSessionSave = async session => {
+    if (process.platform === 'linux' && (session.connectedOverCDP || session.manualChromeDebugPort)) {
+        await closeBrowser({ preserveTask: true, session });
+        currentAccountKey = session.accountKey;
+        return;
+    }
+
+    if (session.connectedOverCDP || isSessionPageOpen(session)) {
+        await hideBrowserWindow(session);
+        return;
+    }
+
+    if (session.manualChromeDebugPort) {
+        await closeBrowser({ preserveTask: true, session });
+        currentAccountKey = session.accountKey;
+        return;
+    }
+
+    await hideBrowserWindow();
 };
 
 const createXManualVerificationError = ({ stage, blocker, task }) => {
@@ -8012,11 +8853,12 @@ const ensureXBrowserReadyForAction = async (session, payload, target, stage = 'x
     if (isPageOpen()) {
         await dismissXDialogs();
         if (await isXLoggedIn()) {
-            return 'already-open';
+            const mismatch = await getXLoggedInAccountMismatch(session);
+            if (!mismatch) {
+                return 'already-open';
+            }
+            console.log(`Open X browser mismatch for ${session.accountName || session.accountKey}: expected @${mismatch.expected}, got ${mismatch.actual ? `@${mismatch.actual}` : 'unknown account'}. Closing it.`);
         }
-    }
-
-    if (isPageOpen()) {
         await closeBrowser({ preserveTask: true });
     }
 
@@ -8024,7 +8866,7 @@ const ensureXBrowserReadyForAction = async (session, payload, target, stage = 'x
     if (fs.existsSync(sessionFile)) {
         console.log(`Trying saved X session for ${session.accountName || session.accountKey}.`);
         try {
-            if (await startXWithSavedSession(sessionFile, validationUrl)) {
+            if (await startXWithSavedSession(session, sessionFile, validationUrl)) {
                 currentAccountKey = session.accountKey;
                 return 'saved-session';
             }
@@ -8076,6 +8918,7 @@ const ensureXBrowserReadyForAction = async (session, payload, target, stage = 'x
             console.log(`Trying ${profileAttempt.label} for ${session.accountName || session.accountKey}.`);
             try {
                 if (await startXWithSystemBrowserProfile({
+                    session,
                     targetUrl: validationUrl,
                     browserChannel,
                     userDataDir: profileAttempt.userDataDir,
@@ -8136,7 +8979,7 @@ const ensureXBrowserReadyForAction = async (session, payload, target, stage = 'x
         return 'password';
     }
 
-    openXManualLoginChrome(session);
+    await openXManualLoginChrome(session);
     const pausedTask = await markXTaskPaused({
         phase: 'login-needed',
         message: `Complete X login in the dedicated Chrome window for "${session.accountName || stripPlatformAccountKey(session.accountKey)}", then click Save & Continue. The controller will save and continue this row.`,
@@ -8422,6 +9265,7 @@ const performXAction = async (session, payload) => {
 
     const completedBefore = await returnCompletedXActionWithoutBrowser(session, target);
     if (completedBefore) {
+        await closeBrowserAfterCompletedTask(session, 'already completed x action');
         return completedBefore;
     }
 
@@ -8429,6 +9273,7 @@ const performXAction = async (session, payload) => {
 
     const completedAfterSchedule = await returnCompletedXActionWithoutBrowser(session, target);
     if (completedAfterSchedule) {
+        await closeBrowserAfterCompletedTask(session, 'already completed x action after schedule');
         return completedAfterSchedule;
     }
 
@@ -8453,7 +9298,19 @@ const performXAction = async (session, payload) => {
     recordTaskEvent(task, 'starting', { status: 'running' });
 
     if (canUseXApiForPayload(payload, session)) {
-        return performXApiAction({ session, payload, target, task });
+        try {
+            return await performXApiAction({ session, payload, target, task });
+        } catch (error) {
+            console.log(`X API action failed for ${session.accountName || session.accountKey}; falling back to browser mode: ${error.message}`);
+            task.apiFallbackError = error.message;
+            task.phase = 'starting-browser';
+            task.updatedAt = new Date().toISOString();
+            recordTaskEvent(task, 'starting-browser', {
+                status: 'running',
+                message: 'X API failed; continuing in browser mode.',
+                error: error.message,
+            });
+        }
     }
 
     await ensureXBrowserReadyForAction(session, payload, target, 'x action');
@@ -8482,6 +9339,7 @@ const performXAction = async (session, payload) => {
 
     const completedAfterNavigation = getCompletedAction(task.accountKey, task.contentKey);
     if (completedAfterNavigation) {
+        await closeBrowserAfterCompletedTask(session, 'already completed x action after navigation');
         return completedAfterNavigation;
     }
 
@@ -8528,6 +9386,9 @@ const getXResumePayloadFromTask = (task, fallbackPayload = {}) => {
 const sendXManualVerificationResponse = (res, action, errorOrTask, extra = {}) => {
     const task = errorOrTask?.manualVerification ? (errorOrTask.task || getActiveTask()) : errorOrTask;
     const phase = extra.phase || task?.phase || (task?.loginRequired ? 'login-needed' : 'manual-verification');
+    const responseSession = task?.accountKey
+        ? browserSessions.get(normalizeAccountName(task.accountKey))
+        : getActiveBrowserSession();
     return res.status(extra.statusCode || 423).json({
         success: false,
         completed: false,
@@ -8544,8 +9405,8 @@ const sendXManualVerificationResponse = (res, action, errorOrTask, extra = {}) =
         paused: true,
         verificationRequired: phase !== 'login-needed',
         loginRequired: phase === 'login-needed',
-        browserVisible: Boolean(isPageOpen()),
-        message: extra.message || errorOrTask?.message || task?.error || 'X login/verification is still waiting.',
+        browserVisible: Boolean(isSessionPageOpen(responseSession) || hasXManualChromeLoginWindow(responseSession)),
+        message: extra.message || task?.error || errorOrTask?.message || 'X login/verification is still waiting.',
         next: extra.next || 'Finish X login/verification in the visible browser, then call POST /x/save-session; it will save and resume this row.',
     });
 };
@@ -8582,6 +9443,7 @@ const startManualVerificationAutoChecks = () => {
 const hasDashboardVisibleSessionWork = session => {
     const task = session.currentTask || null;
     const pageOpen = Boolean(session.page && !session.page.isClosed());
+    const manualXChromeOpen = hasXManualChromeLoginWindow(session);
     const hasPendingWork = Boolean((session.pendingOperations || 0) > 0 || (session.queuedActionTasks || []).length);
     const hasTarget = Boolean(
         task?.contentKey
@@ -8591,11 +9453,11 @@ const hasDashboardVisibleSessionWork = session => {
         || task?.finalUrl
     );
 
-    if (!pageOpen && !hasPendingWork) {
+    if (!pageOpen && !manualXChromeOpen && !hasPendingWork) {
         return false;
     }
 
-    return Boolean(pageOpen || hasPendingWork || hasTarget);
+    return Boolean(pageOpen || manualXChromeOpen || hasPendingWork || hasTarget);
 };
 
 const getActiveSessionsSummary = ({ platform = null } = {}) => {
@@ -8603,43 +9465,49 @@ const getActiveSessionsSummary = ({ platform = null } = {}) => {
     return Array.from(browserSessions.values())
         .filter(session => !requestedPlatform || getItemPlatform(session) === requestedPlatform)
         .filter(hasDashboardVisibleSessionWork)
-        .map(session => ({
-            platform: getItemPlatform(session),
-            account: session.accountName || session.accountKey,
-            accountKey: session.accountKey,
-            browserStarted: Boolean(session.page && !session.page.isClosed()),
-            pendingOperations: session.pendingOperations || 0,
-            queuedOperations: Math.max(0, (session.pendingOperations || 0) - (session.activeOperation ? 1 : 0)),
-            activeOperation: session.activeOperation || session.currentTask?.phase || null,
-            lastQueueUpdateAt: session.lastQueueUpdateAt || null,
-            manualVerification: session.manualVerification || null,
-            browserVisibleForManualVerification: Boolean(session.browserVisibleForManualVerification),
-            url: session.page && !session.page.isClosed() ? session.page.url() : null,
-            currentTask: session.currentTask
-                ? {
-                    platform: getItemPlatform(session.currentTask),
-                    contentKey: session.currentTask.contentKey || null,
-                    requestedContentKey: session.currentTask.requestedContentKey || null,
-                    finalContentKey: session.currentTask.finalContentKey || null,
-                    originalUrl: session.currentTask.originalUrl || null,
-                    finalUrl: session.currentTask.finalUrl || null,
-                    phase: session.currentTask.phase || null,
-                    actionState: session.currentTask.actionState || deriveActionState(session.currentTask) || null,
-                    actionStateRank: session.currentTask.actionStateRank ?? getActionStateRank(deriveActionState(session.currentTask)),
-                    skipped: Boolean(session.currentTask.skip),
-                    redirected: Boolean(session.currentTask.redirected),
-                    redirectBrowsingDone: Boolean(session.currentTask.redirectBrowsingDone),
-                    verificationRequired: Boolean(session.currentTask.verificationRequired),
-                    loginRequired: Boolean(session.currentTask.loginRequired),
-                    verificationStage: session.currentTask.verificationStage || null,
-                    verificationBlocker: session.currentTask.verificationBlocker || null,
-                    error: session.currentTask.error || null,
-                    startedAt: session.currentTask.startedAt || null,
-                    completedAt: session.currentTask.completedAt || session.currentTask.completedAction?.completedAt || null,
-                    updatedAt: session.currentTask.updatedAt || null,
-                }
-                : null,
-        }));
+        .map(session => {
+            const pageOpen = Boolean(session.page && !session.page.isClosed());
+            const manualXChromeOpen = hasXManualChromeLoginWindow(session);
+            return {
+                platform: getItemPlatform(session),
+                account: session.accountName || session.accountKey,
+                accountKey: session.accountKey,
+                browserStarted: pageOpen || manualXChromeOpen,
+                pendingOperations: session.pendingOperations || 0,
+                queuedOperations: Math.max(0, (session.pendingOperations || 0) - (session.activeOperation ? 1 : 0)),
+                activeOperation: session.activeOperation || session.currentTask?.phase || null,
+                lastQueueUpdateAt: session.lastQueueUpdateAt || null,
+                manualVerification: session.manualVerification || null,
+                browserVisibleForManualVerification: Boolean(session.browserVisibleForManualVerification || manualXChromeOpen),
+                manualChromeDebugPort: session.manualChromeDebugPort || null,
+                manualChromeUserDataDir: session.manualChromeUserDataDir || null,
+                url: pageOpen ? session.page.url() : manualXChromeOpen ? X_LOGIN_URL : null,
+                currentTask: session.currentTask
+                    ? {
+                        platform: getItemPlatform(session.currentTask),
+                        contentKey: session.currentTask.contentKey || null,
+                        requestedContentKey: session.currentTask.requestedContentKey || null,
+                        finalContentKey: session.currentTask.finalContentKey || null,
+                        originalUrl: session.currentTask.originalUrl || null,
+                        finalUrl: session.currentTask.finalUrl || null,
+                        phase: session.currentTask.phase || null,
+                        actionState: session.currentTask.actionState || deriveActionState(session.currentTask) || null,
+                        actionStateRank: session.currentTask.actionStateRank ?? getActionStateRank(deriveActionState(session.currentTask)),
+                        skipped: Boolean(session.currentTask.skip),
+                        redirected: Boolean(session.currentTask.redirected),
+                        redirectBrowsingDone: Boolean(session.currentTask.redirectBrowsingDone),
+                        verificationRequired: Boolean(session.currentTask.verificationRequired),
+                        loginRequired: Boolean(session.currentTask.loginRequired),
+                        verificationStage: session.currentTask.verificationStage || null,
+                        verificationBlocker: session.currentTask.verificationBlocker || null,
+                        error: session.currentTask.error || null,
+                        startedAt: session.currentTask.startedAt || null,
+                        completedAt: session.currentTask.completedAt || session.currentTask.completedAction?.completedAt || null,
+                        updatedAt: session.currentTask.updatedAt || null,
+                    }
+                    : null,
+            };
+        });
 };
 
 const getActionHistorySummary = ({ accountKey, contentKey, platform = null, limit = 120 } = {}) => {
@@ -8862,6 +9730,8 @@ app.post(['/x/action', '/x/reply'], async (req, res) => {
 
         await runInBrowserSession(session, async () => {
             const completedAction = await performXAction(session, payload);
+            const target = getXActionTargetFromPayload(payload);
+            const sheetCompletedAction = withXSheetTargetFallback(completedAction, session.currentTask, target);
             res.json({
                 success: true,
                 completed: true,
@@ -8871,14 +9741,36 @@ app.post(['/x/action', '/x/reply'], async (req, res) => {
                 platform: 'x',
                 account: session.accountName || stripPlatformAccountKey(session.accountKey),
                 accountKey: session.accountKey,
-                contentKey: completedAction?.contentKey || null,
-                completedAction,
-                ...completedActionSheetFields(completedAction),
+                contentKey: sheetCompletedAction?.contentKey || null,
+                rowNumber: sheetCompletedAction?.rowNumber || target.rowNumber || null,
+                completedAction: sheetCompletedAction,
+                ...completedActionSheetFields(sheetCompletedAction),
             });
         }, 'x-action');
     } catch (error) {
         console.error('X action error:', error.message);
         if (error?.manualVerification) {
+            const target = payload ? getXActionTargetFromPayload(payload) : {};
+            const completedAction = session
+                ? await waitForXManualActionCompletion(session, error.task || session.currentTask, target)
+                : null;
+            if (completedAction) {
+                const sheetCompletedAction = withXSheetTargetFallback(completedAction, error.task || session.currentTask, target);
+                return res.json({
+                    success: true,
+                    completed: true,
+                    status: 'done',
+                    actionStatus: 'done',
+                    action: 'x-action',
+                    platform: 'x',
+                    account: session.accountName || stripPlatformAccountKey(session.accountKey),
+                    accountKey: session.accountKey,
+                    contentKey: sheetCompletedAction?.contentKey || target.contentKey || null,
+                    rowNumber: sheetCompletedAction?.rowNumber || target.rowNumber || null,
+                    completedAction: sheetCompletedAction,
+                    ...completedActionSheetFields(sheetCompletedAction),
+                });
+            }
             return sendXManualVerificationResponse(res, 'x-action', error, { statusCode: 200 });
         }
         const target = payload ? getXActionTargetFromPayload(payload) : {};
@@ -8902,13 +9794,38 @@ app.post(['/x/action', '/x/reply'], async (req, res) => {
 });
 
 app.post('/x/save-session', async (req, res) => {
+    let saveSessionLock = null;
     try {
         const payload = getPayload(req);
         const session = getXSessionForRequestPayload(payload);
+        if (session.xSaveSessionInFlight) {
+            return res.status(202).json({
+                success: true,
+                completed: false,
+                status: 'running',
+                actionStatus: 'running',
+                action: 'x-save-session',
+                platform: 'x',
+                account: session.accountName || stripPlatformAccountKey(session.accountKey),
+                accountKey: session.accountKey,
+                message: 'Save & Continue is already running for this account.',
+            });
+        }
+        session.xSaveSessionInFlight = true;
+        saveSessionLock = session;
         await runInBrowserSession(session, async () => {
             let sessionFile = getXSessionFileForAccountKey(session.accountKey);
+            await withTimeout(
+                switchXManualChromeSessionToExpectedAccount(session),
+                X_SAVE_SESSION_SCAN_TIMEOUT_MS,
+                'Finding matching X login Chrome',
+            );
             if (!isPageOpen()) {
-                const loggedIn = await connectToXManualChromeSession(session);
+                const loggedIn = await withTimeout(
+                    connectToXManualChromeSession(session),
+                    X_SAVE_SESSION_CONNECT_TIMEOUT_MS,
+                    'Connecting to X login Chrome',
+                );
                 if (!loggedIn) {
                     const task = await markXTaskPaused({
                         phase: 'login-needed',
@@ -8922,11 +9839,21 @@ app.post('/x/save-session', async (req, res) => {
                         message: task.error,
                     });
                 }
+                const accountCheck = await withTimeout(
+                    validateXLoggedInAccountForSave({ session, payload, stage: 'x save-session' }),
+                    X_SAVE_SESSION_STEP_TIMEOUT_MS,
+                    'Checking logged-in X account',
+                );
+                if (!accountCheck.ok) {
+                    return sendXManualVerificationResponse(res, 'x-save-session', accountCheck.task, {
+                        message: accountCheck.task.error,
+                    });
+                }
                 await saveSession(sessionFile);
-                await hideBrowserWindow();
+                await withTimeout(hideXBrowserAfterSessionSave(session), X_SAVE_SESSION_STEP_TIMEOUT_MS, 'Hiding X browser');
             } else {
                 await dismissXDialogs();
-                if (!await isXLoggedIn()) {
+                if (!await withTimeout(isXLoggedIn(), X_SAVE_SESSION_STEP_TIMEOUT_MS, 'Checking X login')) {
                     const task = await markXTaskPaused({
                         phase: 'login-needed',
                         message: 'X is not logged in yet. Complete login in the visible browser, then save again.',
@@ -8939,8 +9866,18 @@ app.post('/x/save-session', async (req, res) => {
                         message: task.error,
                     });
                 }
+                const accountCheck = await withTimeout(
+                    validateXLoggedInAccountForSave({ session, payload, stage: 'x save-session' }),
+                    X_SAVE_SESSION_STEP_TIMEOUT_MS,
+                    'Checking logged-in X account',
+                );
+                if (!accountCheck.ok) {
+                    return sendXManualVerificationResponse(res, 'x-save-session', accountCheck.task, {
+                        message: accountCheck.task.error,
+                    });
+                }
                 await saveSession(sessionFile);
-                await hideBrowserWindow();
+                await withTimeout(hideXBrowserAfterSessionSave(session), X_SAVE_SESSION_STEP_TIMEOUT_MS, 'Hiding X browser');
             }
 
             currentAccountKey = session.accountKey;
@@ -8962,6 +9899,8 @@ app.post('/x/save-session', async (req, res) => {
 
             if (resumePayload) {
                 const completedAction = await performXAction(session, resumePayload);
+                const resumeTarget = getXActionTargetFromPayload(resumePayload);
+                const sheetCompletedAction = withXSheetTargetFallback(completedAction, session.currentTask, resumeTarget);
                 return res.json({
                     success: true,
                     completed: true,
@@ -8974,13 +9913,14 @@ app.post('/x/save-session', async (req, res) => {
                     accountKey: session.accountKey,
                     sessionSaved: true,
                     sessionFile,
-                    contentKey: completedAction?.contentKey || null,
-                    completedAction,
-                    ...completedActionSheetFields(completedAction),
+                    contentKey: sheetCompletedAction?.contentKey || null,
+                    rowNumber: sheetCompletedAction?.rowNumber || resumeTarget.rowNumber || null,
+                    completedAction: sheetCompletedAction,
+                    ...completedActionSheetFields(sheetCompletedAction),
                 });
             }
 
-            await hideBrowserWindow();
+            await withTimeout(hideXBrowserAfterSessionSave(session), X_SAVE_SESSION_STEP_TIMEOUT_MS, 'Hiding X browser');
             res.json({
                 success: true,
                 platform: 'x',
@@ -8996,6 +9936,10 @@ app.post('/x/save-session', async (req, res) => {
             return sendXManualVerificationResponse(res, 'x-save-session', error);
         }
         sendError(res, error);
+    } finally {
+        if (saveSessionLock) {
+            saveSessionLock.xSaveSessionInFlight = false;
+        }
     }
 });
 
@@ -9097,7 +10041,7 @@ app.post('/browser/start', async (req, res) => {
                             session,
                             password: savedPassword,
                             stage: 'start login recovery',
-                            targetUrl: getTaskTargetUrl(activeTask),
+                            targetUrl: null,
                         });
                         return res.json({ success: true, account: accountName, loginMethod: 'password-recovery', sessionSaved: true });
                     }
@@ -9374,6 +10318,8 @@ app.post('/browser/navigate', async (req, res) => {
                 return res.json(queuedTaskResponse('navigate', queuedTask, activeBeforeNavigation));
             }
 
+            await waitForSchedule(payload, `Instagram row ${payloadTarget.rowNumber || requestedContentKey || url}`);
+
             if (!activeBeforeNavigation || isFinalTask(activeBeforeNavigation)) {
                 startCurrentTask(session.accountKey, session.accountName);
             }
@@ -9384,6 +10330,7 @@ app.post('/browser/navigate', async (req, res) => {
             task.contentKey = requestedContentKey;
             task.rowNumber = payloadTarget.rowNumber || rememberedPost?.rowNumber || task.rowNumber || null;
             task.comment = payloadTarget.comment || rememberedPost?.comment || task.comment || null;
+            applyScheduleFieldsToTask(task, payload);
             task.finalUrl = null;
             task.redirected = false;
             task.redirectBrowsingDone = false;
@@ -9408,7 +10355,7 @@ app.post('/browser/navigate', async (req, res) => {
                 rowNumber: task.rowNumber || null,
                 comment: task.comment || null,
             });
-            await wait(8000);
+            await wait(INSTAGRAM_NAVIGATION_SETTLE_MS);
             await dismissInstagramDialogs();
             await throwIfInstagramBlocked('navigation');
             await throwIfInstagramLoginRequired('navigation login', {
@@ -9416,7 +10363,7 @@ app.post('/browser/navigate', async (req, res) => {
                 payload,
                 targetUrl: url,
             });
-            await wait(1000);
+            await wait(500);
 
             const finalUrl = page.url();
             const finalContentKey = getInstagramContentKey(finalUrl) || requestedContentKey;
@@ -9545,7 +10492,7 @@ app.post('/browser/like', async (req, res) => {
                 recordTaskEvent(task, 'liking', { status: 'running' });
                 await ensureTaskTargetPage(task, 'like');
             }
-            await wait(3000);
+            await wait(INSTAGRAM_ACTION_READY_WAIT_MS);
             await dismissInstagramDialogs();
             await throwIfInstagramBlocked('like');
             await throwIfInstagramLoginRequired('like login', {
@@ -9590,7 +10537,7 @@ app.post('/browser/like', async (req, res) => {
                 }
             }
 
-            await wait(2000);
+            await wait(INSTAGRAM_LIKE_VERIFY_WAIT_MS);
             await dismissInstagramDialogs();
             await throwIfInstagramBlocked('like verification');
             const recoveredLoginAfterLike = await throwIfInstagramLoginRequired('like verification login', {
@@ -9611,7 +10558,7 @@ app.post('/browser/like', async (req, res) => {
                         await page.click('body', { clickCount: 2 });
                     }
                 }
-                await wait(2000);
+                await wait(INSTAGRAM_LIKE_VERIFY_WAIT_MS);
                 await dismissInstagramDialogs();
                 await throwIfInstagramBlocked('like retry verification');
             }
